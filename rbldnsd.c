@@ -30,7 +30,17 @@
 # include <sys/poll.h>
 #endif
 #ifndef NO_MEMINFO
-# include <malloc.h>
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#endif
+
+#if defined(__linux__)
+#include <malloc.h>
+#endif
+
+#if defined(__FreeBSD__)
+#include <malloc_np.h>
+#endif
 #endif
 #ifndef NO_TIMES
 # include <sys/times.h>
@@ -1081,7 +1091,7 @@ static int do_reload(int do_fork) {
         ", time %lu.%lue/%lu.%luu sec", sec(etm), sec(utm));
 # undef sec
 #endif /* NO_TIMES */
-#ifndef NO_MEMINFO
+#if !defined(NO_MEMINFO) && defined(__linux__)
   {
     struct mallinfo mi = mallinfo();
 # define kb(x) ((mi.x + 512)>>10)
