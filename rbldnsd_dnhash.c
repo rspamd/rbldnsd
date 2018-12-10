@@ -11,6 +11,11 @@
 
 #include "rbldnsd.h"
 
+struct key {
+  unsigned len;
+  const unsigned char *ldn;
+};
+
 struct entry {
   const unsigned char *ldn;	/* DN key, mp-allocated, length byte first */
   const char *rr;		/* A and TXT RRs */
@@ -18,8 +23,19 @@ struct entry {
 
 static unsigned hash_seed = 0xdeadbabe;
 
-#define t1ha_str(key) t1ha2_atonce((key), strlen(key), hash_seed)
-KHASH_INIT(dnhash, const unsigned char *, struct entry, 1, t1ha_str, kh_str_hash_equal);
+static inline int
+key_hash_func(struct key k)
+{
+  return t1ha2_atonce(k.ldn, k.len, hash_seed);
+}
+
+static inline int
+key_eq_func(struct key k1, struct key k2)
+{
+  return k1.len == k2.len && memcmp(k1.ldn, k2.ldn, k1.len) == 0;
+}
+
+KHASH_INIT(dnhash, struct key, struct entry, 1, key_hash_func, key_eq_func);
 
 
 /* There are two similar arrays -
@@ -47,12 +63,15 @@ static void ds_dnhash_start(struct dataset *ds) {
 static int
 ds_dnhash_addent(struct dsdata *d,
                 const unsigned char *ldn, const char *rr,
-                unsigned dnlab) {
+                unsigned dnlen) {
   struct entry *e;
   khiter_t k;
+  struct key key;
   int ret;
 
-  k = kh_put(dnhash, d->h, ldn, &ret);
+  key.ldn = ldn;
+  key.len = dnlen;
+  k = kh_put(dnhash, d->h, key, &ret);
 
   if (ret < 0) {
     return 0;
@@ -102,14 +121,12 @@ ds_dnhash_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   else if (!(rr = mp_dmemdup(ds->ds_mp, rr, size)))
     return 0;
 
-  ldn = (unsigned char*)mp_alloc(ds->ds_mp, dnlen + 1, 0);
+  ldn = (unsigned char*)mp_alloc(ds->ds_mp, dnlen, 0);
   if (!ldn)
     return 0;
-  ldn[0] = (unsigned char)(dnlen - 1);
-  memcpy(ldn + 1, dn, dnlen);
+  memcpy(ldn, dn, dnlen);
 
-  dnlen = dns_dnlabels(dn);
-  if (!ds_dnhash_addent(dsd, ldn, rr, dnlen))
+  if (!ds_dnhash_addent(dsd, ldn, rr, dnlen - 1))
     return 0;
 
   return 1;
@@ -130,11 +147,14 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
   const struct entry *e;
   char name[DNS_MAXDOMAIN+1];
   khiter_t k;
+  struct key srch;
 
   if (!qlab) return 0;		/* do not match empty dn */
   check_query_overwrites(qi);
 
-  k = kh_get(dnhash, dsd->h, dn);
+  srch.len = qi->qi_dnlen0;
+  srch.ldn = dn;
+  k = kh_get(dnhash, dsd->h, srch);
 
   if (k != kh_end(dsd->h)) {
     e = &kh_value(dsd->h, k);
