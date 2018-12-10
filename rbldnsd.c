@@ -133,9 +133,7 @@ const struct dstype *ds_types[] = {
   dstype(ip6tset),
   dstype(ip6trie),
   dstype(dnset),
-#ifdef DNHASH
   dstype(dnhash),
-#endif
   dstype(combined),
   dstype(generic),
   dstype(acl),

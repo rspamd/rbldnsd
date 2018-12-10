@@ -33,6 +33,7 @@ void PRINTFLIKE(2,3) NORETURN error(int errnum, const char *fmt, ...);
 struct zone;
 struct dataset;
 struct dsdata;
+struct dhdata;
 struct dsctx;
 struct sockaddr;
 
