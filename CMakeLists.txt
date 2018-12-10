@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.0)
 project(rbldnsd C)
 
 set(CMAKE_C_STANDARD 11)
-set(RBLDNSD_VERSION 0.999)
+set(RBLDNSD_VERSION 1.0.0)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
@@ -258,6 +258,7 @@ ProcessPackage(LIBZ LIBRARY z INCLUDE zlib.h INCLUDE_SUFFIXES include/zlib
 
 configure_file(config.h.in config.h)
 add_definitions("-DHAVE_CONFIG_H")
+add_subdirectory(t1ha)
 
 add_executable(rbldnsd
         btrie.c
@@ -279,6 +280,7 @@ add_executable(rbldnsd
         rbldnsd.c
         rbldnsd_acl.c
         rbldnsd_combined.c
+        rbldnsd_dnhash.c
         rbldnsd_dnset.c
         rbldnsd_generic.c
         rbldnsd_ip4set.c
@@ -291,6 +293,7 @@ add_executable(rbldnsd
         rbldnsd_zones.c
         ${CMAKE_CURRENT_BINARY_DIR}/dns_nametab.c)
 set_target_properties(rbldnsd PROPERTIES VERSION ${RBLDNSD_VERSION})
+target_link_libraries(rbldnsd t1ha)
 target_link_libraries(rbldnsd ${CMAKE_REQUIRED_LIBRARIES})
 
 add_custom_command(
