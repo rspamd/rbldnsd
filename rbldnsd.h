@@ -169,6 +169,7 @@ declaredstype(ip6tset);
 declaredstype(ip6trie);
 declaredstype(dnset);
 declaredstype(dnhash);
+declaredstype(dnhash_fixed);
 declaredstype(generic);
 declaredstype(combined);
 declaredstype(acl);

@@ -281,6 +281,7 @@ add_executable(rbldnsd
         rbldnsd_acl.c
         rbldnsd_combined.c
         rbldnsd_dnhash.c
+        rbldnsd_dnhash_fixed.c
         rbldnsd_dnset.c
         rbldnsd_generic.c
         rbldnsd_ip4set.c
