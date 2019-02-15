@@ -14,6 +14,8 @@ option(NO_IPv6 "If you don't want/have IPv6 support (transport only)" OFF)
 option(NO_MASTER_DUMP "To disable master-format (named) dump (-d option)" OFF)
 option(NO_ZLIB "To disable usage of zlib (also LIBS - for zlib, -lz is needed)" OFF)
 option(ENABLE_OPTIMIZATION "Enable extra optimizations [default: ON]"          ON)
+option(ENABLE_JEMALLOC     "Build rbldnsd with jemalloc allocator  [default: OFF]" OFF)
+
 
 # Process required package by using FindPackage and calling for INCLUDE_DIRECTORIES and
 # setting list of required libraries
@@ -255,6 +257,13 @@ set(CMAKE_C_FLAGS "${CMAKE_C_OPT_FLAGS} ${CMAKE_C_FLAGS} ${CMAKE_C_WARN_FLAGS}")
 
 ProcessPackage(LIBZ LIBRARY z INCLUDE zlib.h INCLUDE_SUFFIXES include/zlib
         ROOT ${LIBZ_ROOT_DIR} MODULES z)
+
+IF(ENABLE_JEMALLOC MATCHES "ON")
+    ProcessPackage(JEMALLOC LIBRARY jemalloc INCLUDE jemalloc.h INCLUDE_SUFFIXES include/jemalloc
+            ROOT ${JEMALLOC_ROOT_DIR} MODULES jemalloc)
+    SET(WITH_JEMALLOC "1")
+    LIST(APPEND CMAKE_REQUIRED_LIBRARIES "-lpthread")
+ENDIF()
 
 configure_file(config.h.in config.h)
 add_definitions("-DHAVE_CONFIG_H")
