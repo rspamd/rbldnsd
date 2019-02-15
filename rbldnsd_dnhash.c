@@ -50,7 +50,7 @@ struct dsdata {
 definedstype(dnhash, 0, "set of (domain name, value) pairs, hashed version");
 
 static void ds_dnhash_reset(struct dsdata *dsd, int UNUSED unused_freeall) {
-  kh_clear(dnhash, dsd->h);
+  kh_destroy(dnhash, dsd->h);
 }
 
 static void ds_dnhash_start(struct dataset *ds) {

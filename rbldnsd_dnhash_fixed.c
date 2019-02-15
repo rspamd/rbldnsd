@@ -47,7 +47,7 @@ struct dsdata {
 definedstype(dnhash_fixed, 0, "set of (domain name, value) pairs, fixed hash version (" STRINGIFY(FIXED_HASHLEN) " bytes)");
 
 static void ds_dnhash_fixed_reset(struct dsdata *dsd, int UNUSED unused_freeall) {
-  kh_clear(dnhash, dsd->h);
+  kh_destroy(dnhash, dsd->h);
 }
 
 static void ds_dnhash_fixed_start(struct dataset *ds) {
