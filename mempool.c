@@ -18,7 +18,7 @@
 #define alignto sizeof(void*)
 #define alignmask (alignto-1)
 
-void *emalloc(unsigned size);
+void *emalloc(size_t size);
 
 #define MEMPOOL_CHUNKSIZE (65536-sizeof(unsigned)*4)
 
