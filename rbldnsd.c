@@ -23,6 +23,10 @@
 #include <sys/wait.h>
 #include "rbldnsd.h"
 
+#ifdef WITH_JEMALLOC
+#include <jemalloc/jemalloc.h>
+#endif
+
 #ifndef NO_SELECT_H
 # include <sys/select.h>
 #endif
@@ -1278,6 +1282,9 @@ int main(int argc, char **argv) {
 }
 
 void oom(void) {
+#ifdef WITH_JEMALLOC
+  malloc_stats_print(NULL, NULL, NULL);
+#endif
   if (initialized)
     dslog(LOG_ERR, 0, "out of memory loading dataset");
   else
