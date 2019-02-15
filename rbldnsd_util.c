@@ -467,7 +467,7 @@ dump_a_txt(const char *name, const char *rr,
 char *emalloc(size_t size) {
   void *ptr;
 #ifdef WITH_JEMALLOC
-  ptr = mallocx(size, MALLOCX_LG_ALIGN(3));
+  ptr = mallocx(size, 0);
 #else
   ptr = malloc(size);
 #endif
@@ -479,7 +479,7 @@ char *emalloc(size_t size) {
 char *ezalloc(size_t size) {
   void *ptr;
 #ifdef WITH_JEMALLOC
-  ptr = mallocx(size, MALLOCX_LG_ALIGN(3)|MALLOCX_ZERO);
+  ptr = mallocx(size, MALLOCX_ZERO);
 #else
   ptr = calloc(1, size);
 #endif
@@ -491,7 +491,7 @@ char *ezalloc(size_t size) {
 char *erealloc(void *ptr, size_t size) {
   void *nptr;
 #ifdef WITH_JEMALLOC
-  nptr = rallocx(ptr, size, MALLOCX_LG_ALIGN(3));
+  nptr = rallocx(ptr, size, 0);
 #else
   nptr = realloc(ptr, size);
 #endif
