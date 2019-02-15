@@ -368,7 +368,7 @@ char *emalloc(size_t size);
 char *ezalloc(size_t size); /* zero-fill */
 char *erealloc(void *ptr, size_t size);
 char *estrdup(const char *str);
-char *ememdup(const void *buf, unsigned size);
+char *ememdup(const void *buf, size_t size);
 
 #define tmalloc(type) ((type*)emalloc(sizeof(type)))
 #define tzalloc(type) ((type*)ezalloc(sizeof(type)))

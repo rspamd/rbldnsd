@@ -10,6 +10,10 @@
 #include <time.h>
 #include "rbldnsd.h"
 
+#ifdef WITH_JEMALLOC
+#include <jemalloc/jemalloc.h>
+#endif
+
 #define digit(c) ((c) >= '0' && (c) <= '9')
 #define d2n(c) ((unsigned)((c) - '0'))
 
@@ -461,27 +465,42 @@ dump_a_txt(const char *name, const char *rr,
 #endif
 
 char *emalloc(size_t size) {
-  void *ptr = malloc(size);
+  void *ptr;
+#ifdef WITH_JEMALLOC
+  ptr = mallocx(size, MALLOCX_LG_ALIGN(3));
+#else
+  ptr = malloc(size);
+#endif
   if (!ptr)
     oom();
   return ptr;
 }
 
 char *ezalloc(size_t size) {
-  void *ptr = calloc(1, size);
+  void *ptr;
+#ifdef WITH_JEMALLOC
+  ptr = mallocx(size, MALLOCX_LG_ALIGN(3)|MALLOCX_ZERO);
+#else
+  ptr = calloc(1, size);
+#endif
   if (!ptr)
     oom();
   return ptr;
 }
 
 char *erealloc(void *ptr, size_t size) {
-  void *nptr = realloc(ptr, size);
+  void *nptr;
+#ifdef WITH_JEMALLOC
+  nptr = rallocx(ptr, size, MALLOCX_LG_ALIGN(3));
+#else
+  nptr = realloc(ptr, size);
+#endif
   if (!nptr)
     oom();
   return nptr;
 }
 
-char *ememdup(const void *buf, unsigned len) {
+char *ememdup(const void *buf, size_t len) {
   char *b = emalloc(len);
   if (b)
     memcpy(b, buf, len);

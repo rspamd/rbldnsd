@@ -9,4 +9,5 @@
 #cmakedefine NO_ZLIB 1
 #define VERSION "${RBLDNSD_VERSION}"
 #cmakedefine HAVE_SETITIMER 1
+#cmakedefine WITH_JEMALLOC 1
 #endif
