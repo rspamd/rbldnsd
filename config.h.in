@@ -1,0 +1,12 @@
+#ifndef CONFIG_H_INCLUDED
+#define CONFIG_H_INCLUDED
+
+#cmakedefine NO_STATS 1
+#cmakedefine NO_TIMES 1
+#cmakedefine NO_MEMINFO 1
+#cmakedefine NO_IPv6 1
+#cmakedefine NO_MASTER_DUMP 1
+#cmakedefine NO_ZLIB 1
+#define VERSION "${RBLDNSD_VERSION}"
+#cmakedefine HAVE_SETITIMER 1
+#endif
