@@ -173,6 +173,7 @@ declaredstype(dnhash_fixed);
 declaredstype(generic);
 declaredstype(combined);
 declaredstype(acl);
+declaredstype(aclkey);
 
 #define dstype(type) (&dataset_##type##_type)
 #define isdstype(dst, type)	((dst) == dstype(type))
@@ -245,7 +246,7 @@ typedef unsigned long dnscnt_t;
 #endif
 struct dnsstats {
   dnscnt_t b_in, b_out;		/* number of bytes: in, out */
-  dnscnt_t q_ok, q_nxd, q_err;	/* number of requests: OK, NXDOMAIN, ERROR */
+  dnscnt_t q_ok, q_nxd, q_err, q_dropped;	/* number of requests: OK, NXDOMAIN, ERROR */
 };
 extern struct dnsstats gstats;	/* global statistics counters */
 #endif /* NO_STATS */
@@ -262,6 +263,7 @@ struct zone {	/* zone, list of zones */
   struct dslist *z_dsl;			/* list of datasets */
   struct dslist **z_dslp;		/* last z_dsl in list */
   struct dataset *z_dsacl;		/* zone ACL */
+  struct dataset *z_dsaclkey;		/* zone keys ACL */
   /* SOA record */
   const struct dssoa *z_dssoa;		/* original SOA from a dataset */
   struct zonesoa *z_zsoa;		/* pre-packed SOA record */
@@ -310,6 +312,8 @@ void addrr_any(struct dnspacket *pkt, unsigned dtp,
   if ((qi)->qi_tflag & NSQUERY_ALWAYS) return NSQUERY_ADDPEER
 
 int ds_acl_query(const struct dataset *ds, struct dnspacket *pkt);
+int ds_aclkey_query(const struct dataset *ds, struct dnsqinfo *qi,
+    struct dnspacket *pkt);
 
 #ifndef NO_MASTER_DUMP
 void dump_a_txt(const char *name, const char *rr,
@@ -360,6 +364,7 @@ extern const char def_rr[5];
 extern int accept_in_cidr;
 extern int nouncompress;
 extern struct dataset *g_dsacl;	/* global acl */
+extern struct dataset *g_dsaclkey;	/* global acl key */
 
 extern const char *show_version; /* version.bind CH TXT */
 

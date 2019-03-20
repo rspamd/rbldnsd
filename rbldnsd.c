@@ -142,6 +142,7 @@ const struct dstype *ds_types[] = {
   dstype(combined),
   dstype(generic),
   dstype(acl),
+  dstype(aclkey),
   NULL
 };
 

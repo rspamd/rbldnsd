@@ -16,6 +16,7 @@
 
 static struct dataset *ds_list;
 struct dataset *g_dsacl;
+struct dataset *g_dsaclkey;
 
 static struct dataset *newdataset(char *spec) {
   /* type:file,file,file... */
@@ -69,7 +70,7 @@ struct zone *newzone(struct zone **zonelist,
                      unsigned char *dn, unsigned dnlen,
                      struct mempool *mp) {
   struct zone *zone, **zonep, **lastzonep;
- 
+
   zonep = zonelist;
   lastzonep = NULL;
 
@@ -138,11 +139,23 @@ struct zone *addzone(struct zone *zonelist, const char *spec) {
   ds = newdataset(p);
 
   if (!dn[0]) {
-    if (!isdstype(ds->ds_type, acl))
+    if (!isdstype(ds->ds_type, acl) && !isdstype(ds->ds_type, aclkey)) {
       error(0, "missing domain name in `%.60s'", spec);
-    if (g_dsacl)
-      error(0, "global acl specified more than once");
-    g_dsacl = ds;
+    }
+    /* Special */
+    if (isdstype(ds->ds_type, acl)) {
+      if (g_dsacl)
+        error(0, "global acl specified more than once");
+      g_dsacl = ds;
+    }
+    else if (isdstype(ds->ds_type, acl)) {
+      if (g_dsaclkey)
+        error(0, "global acl key specified more than once");
+      g_dsaclkey = ds;
+    }
+    else {
+      abort();
+    }
   }
   else {
     zone = newzone(&zonelist, dn, dnlen, NULL);
@@ -151,9 +164,16 @@ struct zone *addzone(struct zone *zonelist, const char *spec) {
         error(0, "repeated ACL definition for zone `%.60s'", name);
       zone->z_dsacl = ds;
     }
-    else
+    else if (isdstype(ds->ds_type, aclkey)) {
+      if (zone->z_dsaclkey)
+        error(0, "repeated ACL key definition for zone `%.60s'", name);
+      zone->z_dsaclkey = ds;
+    }
+    else {
       connectdataset(zone, ds, tmalloc(struct dslist));
+    }
   }
+
   free(p);
 
   return zonelist;

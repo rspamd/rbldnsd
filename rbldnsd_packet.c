@@ -293,8 +293,9 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
       return 0;
     }
   }
-  else
+  else {
     found = 0;
+  }
 
   if (!parsequery(pkt, qlen, &qry)) {
     do_stats(gstats.q_err += 1; gstats.b_in += qlen);
@@ -355,6 +356,15 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
   if (!zone) /* not authoritative */
     refuse(DNS_R_REFUSED);
 
+
+  /* check global ACL key, we can do it merely after zone data has been parsed */
+  if (g_dsaclkey && g_dsaclkey->ds_stamp) {
+    found = ds_aclkey_query(g_dsaclkey, &qi, pkt);
+    if (found & NSQUERY_IGNORE) {
+      do_stats(gstats.q_dropped += 1; gstats.b_in += qlen);
+      return 0;
+    }
+  }
   /* found matching zone */
 #undef refuse
 #define refuse(code)  _refuse(code, err_z)
@@ -364,6 +374,14 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
     qi.qi_tflag |= ds_acl_query(zone->z_dsacl, pkt);
     if (qi.qi_tflag & NSQUERY_IGNORE) {
       do_stats(gstats.q_err += 1);
+      return 0;
+    }
+  }
+
+  if (zone->z_dsaclkey && zone->z_dsaclkey->ds_stamp) {
+    qi.qi_tflag |= ds_aclkey_query(zone->z_dsacl, &qi, pkt);
+    if (qi.qi_tflag & NSQUERY_IGNORE) {
+      do_stats(gstats.q_dropped += 1);
       return 0;
     }
   }
