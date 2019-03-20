@@ -67,6 +67,7 @@ struct dnsqinfo {	/* qi */
   int qi_ip6valid;			/* true if qi_ip6 is valid */
   ip4addr_t qi_ip4;			/* parsed IP4 address */
   ip6oct_t qi_ip6[IP6ADDR_FULL];	/* parsed IP6 address */
+  void *qi_additional;  /* additional pointer depending on tflag */
 };
 
 #define PACK32(b,n) ((b)[0]=(n)>>24,(b)[1]=(n)>>16,(b)[2]=(n)>>8,(b)[3]=(n))
@@ -124,6 +125,9 @@ ds_dumpfn_t(const struct dataset *ds, const unsigned char *odn, FILE *f);
 #define NSQUERY_REFUSE	0x020000u
 #define NSQUERY_EMPTY	0x040000u
 #define NSQUERY_ALWAYS	0x080000u
+
+/* special case for keyed ACL */
+#define NSQUERY_KEY 0x0100000u
 
 /* result flags from dataset queryfn */
 #define NSQUERY_FOUND	0x01
@@ -289,14 +293,15 @@ int update_zone_ns(struct zone *zone, const struct dsns *dsns, unsigned ttl,
                    const struct zone *zonelist);
 
 /* parse query and construct a reply to it, return len of answer or 0 */
-int replypacket(struct dnspacket *p, unsigned qlen, struct zone *zone);
+int replypacket(struct dnspacket *p, unsigned qlen, struct zone *zone,
+                struct dnsqinfo *qi);
 const struct zone *
 findqzone(const struct zone *zonelist,
           unsigned dnlen, unsigned dnlab, unsigned char *const *const dnlptr,
           struct dnsqinfo *qi);
 
 /* log a reply */
-void logreply(const struct dnspacket *pkt, FILE *flog, int flushlog);
+void logreply(const struct dnspacket *pkt, FILE *flog, int flushlog, const struct dnsqinfo *qi);
 
 /* details of DNS packet structure are in rbldnsd_packet.c */
 

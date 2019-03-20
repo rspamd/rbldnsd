@@ -192,6 +192,13 @@ ds_aclkey_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   key.ldn = key_storage;
   key.len = tail - s;
 
+  if (key.len > DNS_MAXLABEL) {
+    dslog(LOG_ERR, dsc, "cannot insert value %s to acl keys: too long (> %d chars)",
+        key.ldn, DNS_MAXLABEL);
+
+    return 0;
+  }
+
   k = kh_put(acl_key_hash, dsd->auth_keys, key, &rrl);
 
   switch(rrl) {
@@ -222,6 +229,7 @@ int ds_aclkey_query(const struct dataset *ds, struct dnsqinfo *qi,
   const char *rr;
   khiter_t k;
   struct acl_key key;
+  int add_flags = 0;
 
   if (qi->qi_dnlab <= 1) {
     rr = ds->ds_dsd->def_rr;
@@ -250,15 +258,18 @@ int ds_aclkey_query(const struct dataset *ds, struct dnsqinfo *qi,
       /* Also modify qi */
       qi->qi_dnlab --;
       qi->qi_dnlen0 -= key.len + 1;
+      add_flags |= NSQUERY_KEY;
+      /* Zero terminated when parsing */
+      qi->qi_additional = (void *)(kh_key(ds->ds_dsd->auth_keys, k).ldn);
     }
   }
 
   switch((unsigned long)rr) {
   case 0: return 0;
-  case RR_IGNORE:	return NSQUERY_IGNORE;
-  case RR_REFUSE:	return NSQUERY_REFUSE;
-  case RR_EMPTY:	return NSQUERY_EMPTY;
-  case RR_PASS:		return 0;
+  case RR_IGNORE:	return add_flags|NSQUERY_IGNORE;
+  case RR_REFUSE:	return add_flags|NSQUERY_REFUSE;
+  case RR_EMPTY:	return add_flags|NSQUERY_EMPTY;
+  case RR_PASS:		return add_flags;
   }
 
   /* Substitute zone value and handle it further in check_query_overwrites */
@@ -267,7 +278,7 @@ int ds_aclkey_query(const struct dataset *ds, struct dnsqinfo *qi,
     pkt->p_substds = ds;
   }
 
-  return NSQUERY_ALWAYS;
+  return add_flags|NSQUERY_ALWAYS;
 }
 
 /*definedstype(acl, DSTF_SPECIAL, "Access Control List dataset");*/

@@ -1187,6 +1187,7 @@ static struct dnspacket pkt;
 static void request(int fd) {
   int q, r;
   socklen_t salen = sizeof(peer_sa);
+  struct dnsqinfo qi;
 
   q = recvfrom(fd, (void*)pkt.p_buf, sizeof(pkt.p_buf), 0,
                (struct sockaddr *)&peer_sa, &salen);
@@ -1194,11 +1195,11 @@ static void request(int fd) {
     return;
 
   pkt.p_peerlen = salen;
-  r = replypacket(&pkt, q, zonelist);
+  r = replypacket(&pkt, q, zonelist, &qi);
   if (!r)
     return;
   if (flog)
-    logreply(&pkt, flog, flushlog);
+    logreply(&pkt, flog, flushlog, &qi);
 
   /* finally, send a reply */
   while(sendto(fd, (void*)pkt.p_buf, r, 0,

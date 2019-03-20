@@ -275,10 +275,9 @@ findqzone(const struct zone *zone,
 #endif
 
 /* construct reply to a query. */
-int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
+int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct dnsqinfo *qi) {
 
   struct dnsquery qry;			/* query structure */
-  struct dnsqinfo qi;			/* query info structure */
   unsigned char *h = pkt->p_buf;	/* packet's header */
   const struct dslist *dsl;
   int found;
@@ -336,30 +335,30 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
       refuse(DNS_R_REFUSED);
   }
   switch(qry.q_type) {
-  case DNS_T_ANY: qi.qi_tflag = NSQUERY_ANY; break;
-  case DNS_T_A:   qi.qi_tflag = NSQUERY_A;   break;
-  case DNS_T_TXT: qi.qi_tflag = NSQUERY_TXT; break;
-  case DNS_T_NS:  qi.qi_tflag = NSQUERY_NS;  break;
-  case DNS_T_SOA: qi.qi_tflag = NSQUERY_SOA; break;
-  case DNS_T_MX:  qi.qi_tflag = NSQUERY_MX;  break;
+  case DNS_T_ANY: qi->qi_tflag = NSQUERY_ANY; break;
+  case DNS_T_A:   qi->qi_tflag = NSQUERY_A;   break;
+  case DNS_T_TXT: qi->qi_tflag = NSQUERY_TXT; break;
+  case DNS_T_NS:  qi->qi_tflag = NSQUERY_NS;  break;
+  case DNS_T_SOA: qi->qi_tflag = NSQUERY_SOA; break;
+  case DNS_T_MX:  qi->qi_tflag = NSQUERY_MX;  break;
   default:
     if (qry.q_type >= DNS_T_TSIG)
       refuse(DNS_R_NOTIMPL);
-    qi.qi_tflag = NSQUERY_OTHER;
+    qi->qi_tflag = NSQUERY_OTHER;
   }
-  qi.qi_tflag |= found;
+  qi->qi_tflag |= found;
   h[p_f2] = DNS_R_NOERROR;
 
   /* find matching zone */
   zone = (struct zone*)
-      findqzone(zone, qry.q_dnlen, qry.q_dnlab, qry.q_lptr, &qi);
+      findqzone(zone, qry.q_dnlen, qry.q_dnlab, qry.q_lptr, qi);
   if (!zone) /* not authoritative */
     refuse(DNS_R_REFUSED);
 
 
   /* check global ACL key, we can do it merely after zone data has been parsed */
   if (g_dsaclkey && g_dsaclkey->ds_stamp) {
-    found = ds_aclkey_query(g_dsaclkey, &qi, pkt);
+    found = ds_aclkey_query(g_dsaclkey, qi, pkt);
     if (found & NSQUERY_IGNORE) {
       do_stats(gstats.q_dropped += 1; gstats.b_in += qlen);
       return 0;
@@ -371,16 +370,16 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
   do_stats(zone->z_stats.b_in += qlen);
 
   if (zone->z_dsacl && zone->z_dsacl->ds_stamp) {
-    qi.qi_tflag |= ds_acl_query(zone->z_dsacl, pkt);
-    if (qi.qi_tflag & NSQUERY_IGNORE) {
+    qi->qi_tflag |= ds_acl_query(zone->z_dsacl, pkt);
+    if (qi->qi_tflag & NSQUERY_IGNORE) {
       do_stats(gstats.q_err += 1);
       return 0;
     }
   }
 
   if (zone->z_dsaclkey && zone->z_dsaclkey->ds_stamp) {
-    qi.qi_tflag |= ds_aclkey_query(zone->z_dsaclkey, &qi, pkt);
-    if (qi.qi_tflag & NSQUERY_IGNORE) {
+    qi->qi_tflag |= ds_aclkey_query(zone->z_dsaclkey, qi, pkt);
+    if (qi->qi_tflag & NSQUERY_IGNORE) {
       do_stats(gstats.q_dropped += 1);
       return 0;
     }
@@ -389,23 +388,23 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
   if (!zone->z_stamp)	/* do not answer if not loaded */
     refuse(DNS_R_SERVFAIL);
 
-  if (qi.qi_tflag & NSQUERY_REFUSE)
+  if (qi->qi_tflag & NSQUERY_REFUSE)
     refuse(DNS_R_REFUSED);
 
-  if ((found = call_hook(query_access, (pkt->p_peer, zone, &qi)))) {
+  if ((found = call_hook(query_access, (pkt->p_peer, zone, qi)))) {
     if (found < 0) return 0;
     refuse(DNS_R_REFUSED);
   }
 
-  if (qi.qi_dnlab == 0) {	/* query to base zone: SOA and NS */
+  if (qi->qi_dnlab == 0) {	/* query to base zone: SOA and NS */
 
     found = NSQUERY_FOUND;
 
     /* NS and SOA with auth=0 will only touch answer section */
-    if ((qi.qi_tflag & NSQUERY_SOA) && !addrr_soa(pkt, zone, 0))
+    if ((qi->qi_tflag & NSQUERY_SOA) && !addrr_soa(pkt, zone, 0))
       found = 0;
     else
-    if ((qi.qi_tflag & NSQUERY_NS) && !addrr_ns(pkt, zone, 0))
+    if ((qi->qi_tflag & NSQUERY_NS) && !addrr_ns(pkt, zone, 0))
       found = 0;
     if (!found) {
       pkt->p_cur = pkt->p_sans;
@@ -419,11 +418,11 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
 
   /* search the datasets */
   for(dsl = zone->z_dsl; dsl; dsl = dsl->dsl_next)
-    found |= dsl->dsl_queryfn(dsl->dsl_ds, &qi, pkt);
+    found |= dsl->dsl_queryfn(dsl->dsl_ds, qi, pkt);
 
   if (found & NSQUERY_ADDPEER) {
 #ifdef NO_IPv6
-    addrr_a_txt(pkt, qi.qi_tflag, pkt->p_substrr,
+    addrr_a_txt(pkt, qi->qi_tflag, pkt->p_substrr,
                 inet_ntoa(((struct sockaddr_in*)pkt->p_peer)->sin_addr),
                 pkt->p_substds);
 #else
@@ -431,7 +430,7 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
     if (getnameinfo(pkt->p_peer, pkt->p_peerlen,
                     subst, NI_MAXHOST, NULL, 0, NI_NUMERICHOST) != 0)
       subst[0] = '\0';
-    addrr_a_txt(pkt, qi.qi_tflag, pkt->p_substrr, subst, pkt->p_substds);
+    addrr_a_txt(pkt, qi->qi_tflag, pkt->p_substrr, subst, pkt->p_substds);
 #endif
   }
 
@@ -448,12 +447,12 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
       addrr_soa(pkt, zone, 1);	/* add SOA if any to AUTHORITY */
     }
     else if (zone->z_nns &&
-             /* (!(qi.qi_tflag & NSQUERY_NS) || qi.qi_dnlab) && */
+             /* (!(qi->qi_tflag & NSQUERY_NS) || qi->qi_dnlab) && */
              !lazy)
       addrr_ns(pkt, zone, 1); /* add nameserver records to positive reply */
     do_stats(zone->z_stats.q_ok += 1);
   }
-  (void)call_hook(query_result, (pkt->p_peer, zone, &qi, found));
+  (void)call_hook(query_result, (pkt->p_peer, zone, qi, found));
   if (rlen() > DNS_MAXPACKET) {	/* add OPT record for long replies */
     /* as per parsequery(), we always have 11 bytes for minimal OPT record at
      * the end of our reply packet, OR rlen() does not exceed DNS_MAXPACKET */
@@ -993,8 +992,8 @@ static int version_req(struct dnspacket *pkt, const struct dnsquery *qry) {
   return 1;
 }
 
-void logreply(const struct dnspacket *pkt, FILE *flog, int flushlog) {
-  char cbuf[DNS_MAXDOMAIN + IPSIZE + 50];
+void logreply(const struct dnspacket *pkt, FILE *flog, int flushlog, const struct dnsqinfo *qi) {
+  char cbuf[DNS_MAXDOMAIN + IPSIZE + 51 + DNS_MAXLABEL];
   char *cp = cbuf;
   const unsigned char *const q = pkt->p_sans - 4;
 
@@ -1012,11 +1011,22 @@ void logreply(const struct dnspacket *pkt, FILE *flog, int flushlog) {
 #endif
   *cp++ = ' ';
   cp += dns_dntop(pkt->p_buf + p_hdrsize, cp, DNS_MAXDOMAIN);
-  cp += sprintf(cp, " %s %s: %s/%u/%d\n",
-      dns_typename(((unsigned)q[0]<<8)|q[1]),
-      dns_classname(((unsigned)q[2]<<8)|q[3]),
-      dns_rcodename(pkt->p_buf[p_f2] & pf2_rcode),
-      pkt->p_buf[p_ancnt2], (int)(pkt->p_cur - pkt->p_buf));
+  cp += sprintf(cp, " %s %s: %s/%u/%d",
+                dns_typename(((unsigned) q[0] << 8) | q[1]),
+                dns_classname(((unsigned) q[2] << 8) | q[3]),
+                dns_rcodename(pkt->p_buf[p_f2] & pf2_rcode),
+                pkt->p_buf[p_ancnt2], (int) (pkt->p_cur - pkt->p_buf));
+
+  if (qi->qi_tflag & NSQUERY_KEY && qi->qi_additional) {
+    int len = strlen(qi->qi_additional);
+
+    *cp++ = ' ';
+    memcpy(cp, qi->qi_additional, len);
+    cp += len;
+  }
+
+  *cp++ = '\n';
+
   if (flushlog)
     write(fileno(flog), cbuf, cp - cbuf);
   else
