@@ -148,7 +148,7 @@ struct zone *addzone(struct zone *zonelist, const char *spec) {
         error(0, "global acl specified more than once");
       g_dsacl = ds;
     }
-    else if (isdstype(ds->ds_type, acl)) {
+    else if (isdstype(ds->ds_type, aclkey)) {
       if (g_dsaclkey)
         error(0, "global acl key specified more than once");
       g_dsaclkey = ds;

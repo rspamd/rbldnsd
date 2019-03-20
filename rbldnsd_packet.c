@@ -379,7 +379,7 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone) {
   }
 
   if (zone->z_dsaclkey && zone->z_dsaclkey->ds_stamp) {
-    qi.qi_tflag |= ds_aclkey_query(zone->z_dsacl, &qi, pkt);
+    qi.qi_tflag |= ds_aclkey_query(zone->z_dsaclkey, &qi, pkt);
     if (qi.qi_tflag & NSQUERY_IGNORE) {
       do_stats(gstats.q_dropped += 1);
       return 0;

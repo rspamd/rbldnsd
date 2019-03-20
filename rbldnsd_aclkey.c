@@ -85,6 +85,7 @@ static const struct {
  /* a 'whitelist' entry: pretend this netrange isn't here */
 #define RR_PASS		4
  { "pass", RR_PASS },
+ { "accept", RR_PASS },
 };
 
 static void ds_aclkey_reset(struct dsdata *dsd, int UNUSED unused_freeall) {
@@ -165,10 +166,6 @@ ds_aclkey_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   tail = s + strcspn(s, ":= ");
 
   if (*tail) {
-    if (*tail == ':' || *tail == '=') {
-      tail ++;
-    }
-
     SKIPSPACE(tail);
 
     if (!*tail || ISCOMMENT(*tail))
@@ -199,10 +196,10 @@ ds_aclkey_line(struct dataset *ds, char *s, struct dsctx *dsc) {
 
   switch(rrl) {
     case -1:
-      dslog(LOG_ERR, dsc, "cannot insert value %s to hash table", key);
+      dslog(LOG_ERR, dsc, "cannot insert value %s to hash table", key.ldn);
       return 0;
     case 0:
-      dslog(LOG_INFO, dsc, "duplicate entry %s", key);
+      dslog(LOG_INFO, dsc, "duplicate entry %s", key.ldn);
       break;
     default:
       break;
