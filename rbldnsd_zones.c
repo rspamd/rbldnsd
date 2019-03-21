@@ -340,15 +340,15 @@ readdslines(struct istream *sp, struct dataset *ds, struct dsctx *dsc) {
   struct dataset *dscur = ds;
   ds_linefn_t *linefn = dscur->ds_type->dst_linefn;
 
-  while((r = istream_getline(sp, &line, '\n')) > 0) {
+  while((r = istream_getline(sp, &line, "\n\r")) > 0) {
     eol = line + r - 1;
     if (noeol) {
-      if (*eol == '\n')
+      if (*eol == '\n' || *eol == '\r')
         noeol = 0;
       continue;
     }
     ++dsc->dsc_lineno;
-    if (*eol == '\n')
+    if (*eol == '\n' || *eol == '\r')
       --eol;
     else {
       dswarn(dsc, "long line (truncated)");

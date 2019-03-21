@@ -23,6 +23,28 @@
 # define UNUSED __attribute__((unused))
 #endif
 
+#define BITOP(a,b,op) \
+		((a)[(size_t)(b)/(8*sizeof *(a))] op (size_t)1<<((size_t)(b)%(8*sizeof *(a))))
+
+static size_t
+memcspn (const char *s, const char *e, size_t len)
+{
+  size_t byteset[32 / sizeof(size_t)];
+  const char *p = s, *end = s + len;
+
+  if (!e[1]) {
+    for (; p < end && *p != *e; p++);
+    return p - s;
+  }
+
+  memset (byteset, 0, sizeof byteset);
+
+  for (; *e && BITOP (byteset, *(unsigned char *)e, |=); e++);
+  for (; p < end && !BITOP (byteset, *(unsigned char *)p, &); p++);
+
+  return p - s;
+}
+
 /* An attempt of efficient copy-less way to read lines from a file.
  * We fill in a buffer, and try to find next newline character.
  * If found, advance 'readp' pointer past it, replace it with
@@ -44,7 +66,7 @@
  * to make i/o more efficient.
  */
 
-int istream_getline(struct istream *sp, char **linep, char delim) {
+int istream_getline(struct istream *sp, char **linep, char *delims) {
   unsigned char *x, *s;
   int r;
 
@@ -53,10 +75,21 @@ int istream_getline(struct istream *sp, char **linep, char delim) {
   for (;;) {
 
     /* check if we already have complete line in the buffer */
-    if (sp->readp < sp->endp &&
-        (x = memchr(sp->readp, delim, sp->endp - sp->readp)))
-      /* yes we have, just return it */
-      return (sp->readp = x + 1) - s;
+    if (sp->readp < sp->endp) {
+      if (*delims) {
+        size_t span = memcspn (sp->readp, delims, sp->endp - sp->readp);
+
+        if (span < sp->endp - sp->readp) {
+          x = sp->readp + span;
+          return (sp->readp = x + 1) - s;
+        }
+      }
+      else {
+        if ((x = memchr(sp->readp, *delims, sp->endp - sp->readp))) {
+          return (sp->readp = x + 1) - s;
+        }
+      }
+    }
 
     sp->readp = sp->endp;
 
@@ -292,7 +325,7 @@ int istream_uncompress_setup(struct istream *sp) {
   while(x--) {
     char *p;
     do
-      if ((r = istream_getline(sp, &p, '\0')) <= 0)
+      if ((r = istream_getline(sp, &p, "\0")) <= 0)
         return -1;
     while (p[r-1] != '\0');
   }

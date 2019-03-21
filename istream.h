@@ -20,7 +20,7 @@ struct istream {
 
 int istream_fillbuf(struct istream *sp);
 int istream_ensurebytes(struct istream *sp, int nbytes);
-int istream_getline(struct istream *sp, char **linep, char delim);
+int istream_getline(struct istream *sp, char **linep, char *delims);
 void istream_init(struct istream *sp,
                   int (*readfn)(struct istream*,unsigned char*,int,int),
                   void (*freefn)(struct istream*), void *cookie);
