@@ -241,26 +241,31 @@ int ds_aclkey_query(const struct dataset *ds, struct dnsqinfo *qi,
       cur_lab += *cur_lab + 1;
     }
 
-    key.ldn = cur_lab + 1;
-    key.len = *cur_lab;
-
-    k = kh_get(acl_key_hash, ds->ds_dsd->auth_keys, key);
-
-    if (k == kh_end(ds->ds_dsd->auth_keys)) {
+    if (*cur_lab == 0) {
       rr = ds->ds_dsd->def_rr;
     }
     else {
-      struct acl_val *val = &kh_value(ds->ds_dsd->auth_keys, k);
+      key.ldn = cur_lab + 1;
+      key.len = *cur_lab;
 
-      rr = val->rr;
-      val->requests ++;
+      k = kh_get(acl_key_hash, ds->ds_dsd->auth_keys, key);
 
-      /* Also modify qi */
-      qi->qi_dnlab --;
-      qi->qi_dnlen0 -= key.len + 1;
-      add_flags |= NSQUERY_KEY;
-      /* Zero terminated when parsing */
-      qi->qi_additional = (void *)(kh_key(ds->ds_dsd->auth_keys, k).ldn);
+      if (k == kh_end(ds->ds_dsd->auth_keys)) {
+        rr = ds->ds_dsd->def_rr;
+      }
+      else {
+        struct acl_val *val = &kh_value(ds->ds_dsd->auth_keys, k);
+
+        rr = val->rr;
+        val->requests++;
+
+        /* Also modify qi */
+        qi->qi_dnlab--;
+        qi->qi_dnlen0 -= key.len + 1;
+        add_flags |= NSQUERY_KEY;
+        /* Zero terminated when parsing */
+        qi->qi_additional = (void *) (kh_key(ds->ds_dsd->auth_keys, k).ldn);
+      }
     }
   }
 
@@ -270,6 +275,7 @@ int ds_aclkey_query(const struct dataset *ds, struct dnsqinfo *qi,
   case RR_REFUSE:	return add_flags|NSQUERY_REFUSE;
   case RR_EMPTY:	return add_flags|NSQUERY_EMPTY;
   case RR_PASS:		return add_flags;
+  default: break; /* Passthrough */
   }
 
   /* Substitute zone value and handle it further in check_query_overwrites */
