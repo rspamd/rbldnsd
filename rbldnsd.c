@@ -23,9 +23,6 @@
 #include <sys/wait.h>
 #include "rbldnsd.h"
 
-#ifdef WITH_JEMALLOC
-#include <jemalloc/jemalloc.h>
-#endif
 
 #ifndef NO_SELECT_H
 # include <sys/select.h>
@@ -33,6 +30,10 @@
 #ifndef NO_POLL
 # include <poll.h>
 #endif
+
+#ifdef WITH_JEMALLOC
+#include <jemalloc/jemalloc.h>
+#else
 #ifndef NO_MEMINFO
 #if defined(__APPLE__)
 #include <malloc/malloc.h>
@@ -45,6 +46,8 @@
 #if defined(__FreeBSD__)
 #include <malloc_np.h>
 #endif
+#endif
+
 #endif
 #ifndef NO_TIMES
 # include <sys/times.h>
@@ -997,7 +1000,11 @@ jemalloc_write_cb(void *ud, const char *msg)
 
 static int do_reload(int do_fork) {
   int r;
+#ifdef WITH_JEMALLOC
+  char ibuf[8192];
+#else
   char ibuf[512];
+#endif
   int ip;
   struct dataset *ds;
   struct zone *zone;

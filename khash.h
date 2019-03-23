@@ -180,10 +180,10 @@ typedef khint_t khiter_t;
 #define kcalloc(N,Z) calloc(N,Z)
 #endif
 #ifndef kmalloc
-#define kmalloc(Z) malloc(Z)
+#define kmalloc(Z) emalloc(Z)
 #endif
 #ifndef krealloc
-#define krealloc(P,Z) realloc(P,Z)
+#define krealloc(P,Z) erealloc(P,Z)
 #endif
 #ifndef kfree
 #define kfree(P) free(P)
