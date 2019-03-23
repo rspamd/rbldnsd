@@ -974,9 +974,30 @@ static void check_expires(void) {
   }
 }
 
+#ifdef WITH_JEMALLOC
+struct jemalloc_write_cbdata {
+  char *buf;
+  size_t len;
+};
+
+static void
+jemalloc_write_cb(void *ud, const char *msg)
+{
+  struct jemalloc_write_cbdata *cbd = (struct jemalloc_write_cbdata *)ud;
+  int r;
+
+  r = ssprintf(cbd->buf, cbd->len, "%s", msg);
+
+  if (r < cbd->len) {
+    cbd->buf += r;
+    cbd->len -= r;
+  }
+}
+#endif
+
 static int do_reload(int do_fork) {
   int r;
-  char ibuf[150];
+  char ibuf[512];
   int ip;
   struct dataset *ds;
   struct zone *zone;
@@ -1095,7 +1116,15 @@ static int do_reload(int do_fork) {
         ", time %lu.%lue/%lu.%luu sec", sec(etm), sec(utm));
 # undef sec
 #endif /* NO_TIMES */
-#if !defined(NO_MEMINFO) && defined(__linux__)
+#ifdef WITH_JEMALLOC
+  struct jemalloc_write_cbdata cbd;
+  ibuf[ip++] = '\n';
+  cbd.buf = ibuf + ip;
+  cbd.len = sizeof(ibuf) - ip;
+  malloc_stats_print(jemalloc_write_cb, (void *)&cbd, NULL);
+  ip = cbd.buf - ibuf;
+#else
+#if !defined(NO_MEMINFO) && defined(__GLIBC__)
   {
     struct mallinfo mi = mallinfo();
 # define kb(x) ((mi.x + 512)>>10)
@@ -1105,6 +1134,7 @@ static int do_reload(int do_fork) {
 # undef kb
   }
 #endif /* NO_MEMINFO */
+#endif
   dslog(LOG_INFO, 0, "%s", ibuf);
 
   check_expires();
