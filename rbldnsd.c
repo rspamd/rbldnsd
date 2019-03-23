@@ -1214,7 +1214,7 @@ static struct sockaddr_in peer_sa;
 #endif
 static struct dnspacket pkt;
 
-static void request(int fd) {
+static int request(int fd) {
   int q, r;
   socklen_t salen = sizeof(peer_sa);
   struct dnsqinfo qi;
@@ -1222,20 +1222,35 @@ static void request(int fd) {
   q = recvfrom(fd, (void*)pkt.p_buf, sizeof(pkt.p_buf), 0,
                (struct sockaddr *)&peer_sa, &salen);
   if (q <= 0)			/* interrupted? */
-    return;
+    return -1;
 
   pkt.p_peerlen = salen;
   r = replypacket(&pkt, q, zonelist, &qi);
   if (!r)
-    return;
+    return 0;
   if (flog)
     logreply(&pkt, flog, flushlog, &qi);
 
-  /* finally, send a reply */
+  /* finally, send a reply (we can loose packet if EAGAIN is there!) */
   while(sendto(fd, (void*)pkt.p_buf, r, 0,
                (struct sockaddr *)&peer_sa, salen) < 0)
-    if (errno != EINTR) break;
+    if (errno != EINTR && errno != EAGAIN) break;
 
+  return 1;
+}
+
+static int
+make_socket_nonblocking(int fd)
+{
+  int ofl;
+
+  ofl = fcntl (fd, F_GETFL, 0);
+
+  if (fcntl (fd, F_SETFL, ofl | O_NONBLOCK) == -1) {
+    dslog(LOG_WARNING, "fcntl failed: %d, '%s'", errno, strerror (errno));
+    return -1;
+  }
+  return 0;
 }
 
 int main(int argc, char **argv) {
@@ -1297,6 +1312,7 @@ int main(int argc, char **argv) {
     int r;
     for(r = 0; r < numsock; ++r) {
       pfda[r].fd = sock[r];
+      make_socket_nonblocking(sock[r]);
       pfda[r].events = POLLIN;
     }
     for(;;) {
@@ -1305,7 +1321,7 @@ int main(int argc, char **argv) {
       if (r <= 0) continue;
       for(pfdi = pfda; pfdi < pfde; ++pfdi) {
         if (!(pfdi->revents & POLLIN)) continue;
-        request(pfdi->fd);
+        while (request(pfdi->fd) != -1) {}
         if (!--r) break;
       }
     }
