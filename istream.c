@@ -11,6 +11,7 @@
 #include <zlib.h>
 #endif
 #include "istream.h"
+#include "rbldnsd.h"
 
 #ifndef EPROTO
 # define EPROTO ENOEXEC
@@ -335,7 +336,7 @@ int istream_uncompress_setup(struct istream *sp) {
     sp->readp += 2;
   }
 
-  zsp = malloc(sizeof(*zsp));
+  zsp = (struct zistream *)emalloc(sizeof(*zsp));
   if (!zsp) {
     errno = ENOMEM;
     return -1;

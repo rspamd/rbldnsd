@@ -464,7 +464,7 @@ dump_a_txt(const char *name, const char *rr,
 
 #endif
 
-char *emalloc(size_t size) {
+void *emalloc(size_t size) {
   void *ptr;
   ptr = malloc(size);
 
@@ -473,7 +473,7 @@ char *emalloc(size_t size) {
   return ptr;
 }
 
-char *ezalloc(size_t size) {
+void *ezalloc(size_t size) {
   void *ptr;
   ptr = calloc(1, size);
   if (!ptr)
@@ -481,7 +481,7 @@ char *ezalloc(size_t size) {
   return ptr;
 }
 
-char *erealloc(void *ptr, size_t size) {
+void *erealloc(void *ptr, size_t size) {
   void *nptr;
   nptr = realloc(ptr, size);
   if (!nptr)

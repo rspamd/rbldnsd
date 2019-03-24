@@ -374,9 +374,9 @@ extern struct dataset *g_dsaclkey;	/* global acl key */
 extern const char *show_version; /* version.bind CH TXT */
 
 void oom(void);
-char *emalloc(size_t size);
-char *ezalloc(size_t size); /* zero-fill */
-char *erealloc(void *ptr, size_t size);
+void *emalloc(size_t size);
+void *ezalloc(size_t size); /* zero-fill */
+void *erealloc(void *ptr, size_t size);
 char *estrdup(const char *str);
 char *ememdup(const void *buf, size_t size);
 
