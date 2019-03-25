@@ -1254,7 +1254,7 @@ make_socket_nonblocking(int fd)
   ofl = fcntl (fd, F_GETFL, 0);
 
   if (fcntl (fd, F_SETFL, ofl | O_NONBLOCK) == -1) {
-    dslog(LOG_WARNING, "fcntl failed: %d, '%s'", errno, strerror (errno));
+    syslog(LOG_WARNING, "fcntl failed: %d, '%s'", errno, strerror (errno));
     return -1;
   }
   return 0;
