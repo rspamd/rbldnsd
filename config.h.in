@@ -10,4 +10,5 @@
 #define VERSION "${RBLDNSD_VERSION}"
 #cmakedefine HAVE_SETITIMER 1
 #cmakedefine WITH_JEMALLOC 1
+#cmakedefine WITH_RECVMMSG 1
 #endif

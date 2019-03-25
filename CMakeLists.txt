@@ -263,6 +263,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND CMAKE_REQUIRED_LIBRARIES rt)
     list(APPEND CMAKE_REQUIRED_LIBRARIES dl)
     list(APPEND CMAKE_REQUIRED_LIBRARIES resolv)
+    add_definitions("-D_GNU_SOURCE")
+    set(WITH_RECVMMSG "1")
 endif()
 
 configure_file(config.h.in config.h)

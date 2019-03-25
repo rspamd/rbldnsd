@@ -43,6 +43,7 @@
 #include <malloc.h>
 #endif
 
+
 #if defined(__FreeBSD__)
 #include <malloc_np.h>
 #endif
@@ -1214,34 +1215,97 @@ static void do_signalled(void) {
   sigprocmask(SIG_SETMASK, &ssempty, NULL);
 }
 
-#ifndef NO_IPv6
-static struct sockaddr_storage peer_sa;
+
+
+#ifdef WITH_RECVMMSG
+#define MSGVEC_LEN 1024
 #else
-static struct sockaddr_in peer_sa;
+#define MSGVEC_LEN 1
 #endif
-static struct dnspacket pkt;
 
 static int request(int fd) {
-  int q, r;
+  int q;
+#ifndef NO_IPv6
+  struct sockaddr_storage peer_sa[MSGVEC_LEN];
+#else
+  struct sockaddr_in peer_sa[MSGVEC_LEN];
+#endif
   socklen_t salen = sizeof(peer_sa);
   struct dnsqinfo qi;
+  struct dnspacket pkt[MSGVEC_LEN];
+  struct iovec iovs[MSGVEC_LEN];
+  int lim, replies_lengths[MSGVEC_LEN];
+#ifdef WITH_RECVMMSG
+#define MSG_FIELD(msg, field) msg.msg_hdr.field
+  struct mmsghdr msg[MSGVEC_LEN];
+#else
+#define MSG_FIELD(msg, field) msg.field
+  struct msghdr msg[MSGVEC_LEN];
+#endif
 
-  q = recvfrom(fd, (void*)pkt.p_buf, sizeof(pkt.p_buf), 0,
-               (struct sockaddr *)&peer_sa, &salen);
-  if (q <= 0)			/* interrupted? */
+  memset(msg, 0, sizeof(*msg) * MSGVEC_LEN);
+
+  for (int i = 0; i < MSGVEC_LEN; i ++) {
+    /* Prepare msghdr structs */
+    iovs[i].iov_base = pkt[i].p_buf;
+    iovs[i].iov_len = sizeof(pkt[i].p_buf);
+    MSG_FIELD(msg[i], msg_name) = (void *)&peer_sa[i];
+    MSG_FIELD(msg[i], msg_namelen) = salen;
+    MSG_FIELD(msg[i], msg_iov) = &iovs[i];
+    MSG_FIELD(msg[i], msg_iovlen) = 1;
+  }
+#ifdef WITH_RECVMMSG
+  q = recvmmsg(fd, msg, MSGVEC_LEN, 0, NULL);
+  lim = q;
+#else
+  q = recvmsg(fd, msg, 0);
+  lim = 1;
+#endif
+  if (q <= 0) {
     return -1;
+  }
 
-  pkt.p_peerlen = salen;
-  r = replypacket(&pkt, q, zonelist, &qi);
-  if (!r)
-    return 0;
-  if (flog)
-    logreply(&pkt, flog, flushlog, &qi);
+  for (int i = 0; i < lim; i ++) {
+#ifdef WITH_RECVMMSG
+    q = msg[i].msg_len;
+#endif
+    pkt[i].p_peerlen = MSG_FIELD(msg[i], msg_namelen);
+    pkt[i].p_peer = MSG_FIELD(msg[i], msg_name);
+    replies_lengths[i] = replypacket(&pkt[i], q, zonelist, &qi);
 
-  /* finally, send a reply (we can loose packet if EAGAIN is there!) */
-  while(sendto(fd, (void*)pkt.p_buf, r, 0,
-               (struct sockaddr *)&peer_sa, salen) < 0)
-    if (errno != EINTR && errno != EAGAIN) break;
+    if (replies_lengths[i]) {
+      if (flog) {
+        logreply(&pkt[i], flog, flushlog, &qi);
+      }
+    }
+  }
+
+  int cur_rep = 0;
+  for (int i = 0; i < lim; i ++) {
+    if (replies_lengths[i] > 0) {
+      iovs[cur_rep].iov_base = pkt[cur_rep].p_buf;
+      iovs[cur_rep].iov_len = replies_lengths[i];
+      MSG_FIELD(msg[cur_rep], msg_name) = (void *)&peer_sa[i];
+      MSG_FIELD(msg[cur_rep], msg_namelen) = MSG_FIELD(msg[i], msg_namelen);
+      MSG_FIELD(msg[cur_rep], msg_iov) = &iovs[cur_rep];
+      MSG_FIELD(msg[cur_rep], msg_iovlen) = 1;
+      cur_rep ++;
+    }
+  }
+
+#ifdef WITH_RECVMMSG
+  while (sendmmsg(fd, msg, cur_rep, 0) < 0) {
+    if (errno != EINTR && errno != EAGAIN) {
+      break;
+    }
+  }
+#else
+  while (sendmsg(fd, msg, 0) < 0) {
+    if (errno != EINTR && errno != EAGAIN) {
+      break;
+    }
+  }
+#endif
 
   return 1;
 }
@@ -1280,8 +1344,6 @@ int main(int argc, char **argv) {
   if (statsfile)
     dumpstats_z();
 #endif
-
-  pkt.p_peer = (struct sockaddr *)&peer_sa;
 
   if (numsock == 1) {
     /* optimized case for only one socket */
