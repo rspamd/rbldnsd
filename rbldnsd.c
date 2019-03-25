@@ -1218,7 +1218,7 @@ static void do_signalled(void) {
 
 
 #ifdef WITH_RECVMMSG
-#define MSGVEC_LEN 1024
+#define MSGVEC_LEN 64
 #else
 #define MSGVEC_LEN 1
 #endif
@@ -1283,7 +1283,7 @@ static int request(int fd) {
   int cur_rep = 0;
   for (int i = 0; i < lim; i ++) {
     if (replies_lengths[i] > 0) {
-      iovs[cur_rep].iov_base = pkt[cur_rep].p_buf;
+      iovs[cur_rep].iov_base = pkt[i].p_buf;
       iovs[cur_rep].iov_len = replies_lengths[i];
       MSG_FIELD(msg[cur_rep], msg_name) = (void *)&peer_sa[i];
       MSG_FIELD(msg[cur_rep], msg_namelen) = MSG_FIELD(msg[i], msg_namelen);
@@ -1390,7 +1390,11 @@ int main(int argc, char **argv) {
       if (r <= 0) continue;
       for(pfdi = pfda; pfdi < pfde; ++pfdi) {
         if (!(pfdi->revents & POLLIN)) continue;
+#ifdef WITH_RECVMMSG
+        request(pfdi->fd);
+#else
         while (request(pfdi->fd) != -1) {}
+#endif
         if (!--r) break;
       }
     }
