@@ -440,24 +440,29 @@ int PRINTFLIKE(3, 4) ssprintf(char *buf, int bufsz, const char *fmt, ...);
 int rbldnsd_extension_init(char *arg, struct zone *zonelist);
 
 /* return true/false depending whenever hook needs to be reloaded */
-extern int (*hook_reload_check)(const struct zone *zonelist);
+typedef int (*hook_reload_check_t)(const struct zone *zonelist);
+extern hook_reload_check_t hook_reload_check;
 
 /* perform actual reload, after all zones has been reloaded. */
-extern int (*hook_reload)(struct zone *zonelist);
+typedef int (*hook_reload_t)(struct zone *zonelist);
+extern hook_reload_t hook_reload;
 
 /* check whenever this query is allowed for this client:
  *  * 0 = ok, <0 = drop the packet, >0 = refuse */
-extern int (*hook_query_access)
+typedef int (*hook_query_access_t)
   (const struct sockaddr *requestor,
    const struct zone *zone,
    const struct dnsqinfo *qinfo);
+extern hook_query_access_t hook_query_access;
+
 
 /* notice result of the OK query */
-extern int (*hook_query_result)
+typedef int (*hook_query_result_t)
   (const struct sockaddr *requestor,
    const struct zone *zone,
    const struct dnsqinfo *qinfo,
    int positive);
+extern hook_query_result_t hook_query_result;
 
 #define call_hook(name, args)	\
 	(hook_##name ? hook_##name args : 0)

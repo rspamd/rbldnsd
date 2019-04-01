@@ -21,6 +21,7 @@
 #include <sys/time.h>	/* some systems can't include time.h and sys/time.h */
 #include <fcntl.h>
 #include <sys/wait.h>
+#include "ev.h"
 #include "rbldnsd.h"
 
 
@@ -129,8 +130,10 @@ static int fork_on_reload;
 static struct iovec *stats_iov;
 #endif
 #ifndef NO_DSO
-int (*hook_reload_check)(), (*hook_reload)();
-int (*hook_query_access)(), (*hook_query_result)();
+hook_reload_check_t hook_reload_check;
+hook_reload_t hook_reload;
+hook_query_access_t hook_query_access;
+hook_query_result_t hook_query_result;
 #endif
 
 /* a list of zonetypes. */
@@ -150,7 +153,7 @@ const struct dstype *ds_types[] = {
   NULL
 };
 
-static int do_reload(int do_fork);
+static int do_reload(int do_fork, struct ev_loop *loop);
 
 static int satoi(const char *s) {
   int n = 0;
@@ -213,14 +216,6 @@ static void NORETURN usage(int exitcode) {
     printf(" %s - %s\n", (*dstp)->dst_name, (*dstp)->dst_descr);
   exit(exitcode);
 }
-
-static volatile int signalled;
-#define SIGNALLED_RELOAD	0x01
-#define SIGNALLED_RELOG		0x02
-#define SIGNALLED_LSTATS	0x04
-#define SIGNALLED_SSTATS	0x08
-#define SIGNALLED_ZSTATS	0x10
-#define SIGNALLED_TERM		0x20
 
 static inline int sockaddr_in_equal(const struct sockaddr_in *addr1,
                                     const struct sockaddr_in *addr2)
@@ -481,7 +476,7 @@ static int logfacility_lookup(const char *facility, int *logfacility) {
     return 0;
 }
 
-static void init(int argc, char **argv) {
+static void init(int argc, char **argv, struct ev_loop *loop) {
   int c;
   char *p;
   const char *user = NULL;
@@ -619,7 +614,7 @@ break;
       error(errno, "unable to chroot to %.50s", rootdir);
     if (workdir && chdir(workdir) < 0)
       error(errno, "unable to chdir to %.50s", workdir);
-    if (!do_reload(0))
+    if (!do_reload(0, loop))
       error(0, "zone loading errors, aborting");
     now = time(NULL);
     printf("; zone dump made %s", ctime(&now));
@@ -658,8 +653,12 @@ break;
       if (read(pfd[0], &c, 1) < 1) exit(1);
       else exit(0);
     }
+
+    /* Forked process */
+    ev_loop_fork(loop);
     cfd = pfd[1];
     close(pfd[0]);
+
 
     openlog(progname, LOG_PID|LOG_NDELAY, logfacility);
     logto = LOGTO_STDERR|LOGTO_SYSLOG;
@@ -741,7 +740,7 @@ break;
     error(0, "unable to iniitialize extension `%s'", ext);
 #endif
 
-  if (!quickstart && !do_reload(0))
+  if (!quickstart && !do_reload(0, loop))
     error(0, "zone loading errors, aborting");
 
   /* count number of zones */
@@ -770,60 +769,10 @@ break;
   }
 
   if (quickstart)
-    do_reload(0);
+    do_reload(0, loop);
 
   /* only set "main" fork_on_reload after first reload */
   fork_on_reload = forkon;
-}
-
-static void sighandler(int sig) {
-  switch(sig) {
-  case SIGHUP:
-    signalled |= SIGNALLED_RELOG|SIGNALLED_RELOAD;
-    break;
-  case SIGALRM:
-#ifndef HAVE_SETITIMER
-    alarm(recheck);
-#endif
-    signalled |= SIGNALLED_RELOAD|SIGNALLED_SSTATS;
-    break;
-#ifndef NO_STATS
-  case SIGUSR1:
-    signalled |= SIGNALLED_LSTATS|SIGNALLED_SSTATS;
-    break;
-  case SIGUSR2:
-    signalled |= SIGNALLED_LSTATS|SIGNALLED_SSTATS|SIGNALLED_ZSTATS;
-    break;
-#endif
-  case SIGTERM:
-  case SIGINT:
-    signalled |= SIGNALLED_TERM;
-    break;
-  }
-}
-
-static sigset_t ssblock; /* signals to block during zone reload */
-static sigset_t ssempty; /* empty set */
-
-static void setup_signals(void) {
-  struct sigaction sa;
-  memset(&sa, 0, sizeof(sa));
-  sa.sa_handler = sighandler;
-  sigemptyset(&ssblock);
-  sigemptyset(&ssempty);
-  sigaction(SIGHUP, &sa, NULL);
-  sigaddset(&ssblock, SIGHUP);
-  sigaction(SIGALRM, &sa, NULL);
-  sigaddset(&ssblock, SIGALRM);
-#ifndef NO_STATS
-  sigaction(SIGUSR1, &sa, NULL);
-  sigaddset(&ssblock, SIGUSR1);
-  sigaction(SIGUSR2, &sa, NULL);
-  sigaddset(&ssblock, SIGUSR2);
-#endif
-  sigaction(SIGTERM, &sa, NULL);
-  sigaction(SIGINT, &sa, NULL);
-  signal(SIGPIPE, SIG_IGN);	/* in case logfile is FIFO */
 }
 
 #ifndef NO_STATS
@@ -999,7 +948,7 @@ jemalloc_write_cb(void *ud, const char *msg)
 }
 #endif
 
-static int do_reload(int do_fork) {
+static int do_reload(int do_fork, struct ev_loop *loop) {
   int r;
 #ifdef WITH_JEMALLOC
   char ibuf[8192];
@@ -1038,6 +987,7 @@ static int do_reload(int do_fork) {
       do_fork = 0;
     }
     else if (!cpid) {	/* child, continue answering queries */
+      ev_loop_fork(loop);
       signal(SIGALRM, SIG_IGN);
       signal(SIGHUP, SIG_IGN);
 #ifndef NO_STATS
@@ -1179,44 +1129,6 @@ static int do_reload(int do_fork) {
   return r;
 }
 
-static void do_signalled(void) {
-  sigprocmask(SIG_SETMASK, &ssblock, NULL);
-  if (signalled & SIGNALLED_TERM) {
-    if (fork_on_reload < 0) { /* this is a temp child; dump stats and exit */
-      ipc_write_stats(1);
-      if (flog && !flushlog)
-        fflush(flog);
-      _exit(0);
-    }
-    dslog(LOG_INFO, 0, "terminating");
-#ifndef NO_STATS
-    if (statsfile)
-      dumpstats();
-    logstats(0);
-    if (statsfile)
-      dumpstats_z();
-#endif
-    exit(0);
-  }
-#ifndef NO_STATS
-  if (signalled & SIGNALLED_SSTATS && statsfile)
-    dumpstats();
-  if (signalled & SIGNALLED_LSTATS) {
-    logstats(signalled & SIGNALLED_ZSTATS);
-    if (signalled & SIGNALLED_ZSTATS && statsfile)
-      dumpstats_z();
-  }
-#endif
-  if (signalled & SIGNALLED_RELOG)
-    reopenlog();
-  if (signalled & SIGNALLED_RELOAD)
-    do_reload(fork_on_reload);
-  signalled = 0;
-  sigprocmask(SIG_SETMASK, &ssempty, NULL);
-}
-
-
-
 #ifdef WITH_RECVMMSG
 #define MSGVEC_LEN 64
 #else
@@ -1324,82 +1236,155 @@ make_socket_nonblocking(int fd)
   return 0;
 }
 
-int main(int argc, char **argv) {
-  init(argc, argv);
-  setup_signals();
-  reopenlog();
-#ifdef HAVE_SETITIMER
-  if (recheck) {
-    struct itimerval itv;
-    itv.it_interval.tv_sec  = itv.it_value.tv_sec  = recheck;
-    itv.it_interval.tv_usec = itv.it_value.tv_usec = 0;
-    if (setitimer(ITIMER_REAL, &itv, NULL) < 0)
-      error(errno, "unable to setitimer()");
+static void
+ev_reload_handler (struct ev_loop *loop, ev_periodic *w, int revents)
+{
+  if (statsfile) {
+    dumpstats();
   }
-#else
-  alarm(recheck);
+
+  do_reload(fork_on_reload, loop);
+}
+
+static void
+ev_request_handler (struct ev_loop *loop, ev_io *w, int revents)
+{
+  request(w->fd);
+}
+
+/*
+ * Signal handlers
+ */
+static void
+ev_usr1_handler (struct ev_loop *loop, ev_signal *w, int revents)
+{
+  if (statsfile) {
+    dumpstats();
+  }
+
+    logstats(0);
+}
+
+static void
+ev_usr2_handler (struct ev_loop *loop, ev_signal *w, int revents)
+{
+  if (statsfile) {
+    dumpstats();
+  }
+
+  logstats(1);
+
+  if (statsfile) {
+    dumpstats_z();
+  }
+
+  do_reload(fork_on_reload, loop);
+}
+
+static void
+ev_hup_handler (struct ev_loop *loop, ev_signal *w, int revents)
+{
+  reopenlog();
+
+  if (statsfile) {
+    dumpstats();
+  }
+
+  do_reload(fork_on_reload, loop);
+}
+
+static void
+ev_term_handler (struct ev_loop *loop, ev_signal *w, int revents)
+{
+  if (fork_on_reload < 0) { /* this is a temp child; dump stats and exit */
+    ipc_write_stats(1);
+    if (flog && !flushlog)
+      fflush(flog);
+    _exit(0);
+  }
+
+  dslog(LOG_INFO, 0, "terminating");
+#ifndef NO_STATS
+  if (statsfile) {
+    dumpstats();
+  }
+  logstats(0);
+  if (statsfile) {
+    dumpstats_z();
+  }
 #endif
+  ev_break (loop, EVBREAK_ALL);
+}
+
+static void setup_signals(struct ev_loop *loop) {
+  static ev_signal ev_hup, ev_usr1, ev_usr2, ev_term, ev_int;
+
+  ev_signal_init(&ev_hup, ev_hup_handler, SIGHUP);
+  ev_signal_init(&ev_usr1, ev_usr1_handler, SIGUSR1);
+  ev_signal_init(&ev_usr2, ev_usr2_handler, SIGUSR2);
+  ev_signal_init(&ev_term, ev_term_handler, SIGTERM);
+  ev_signal_init(&ev_int, ev_term_handler, SIGINT);
+
+  ev_signal_start(loop, &ev_hup);
+  ev_signal_start(loop, &ev_usr1);
+  ev_signal_start(loop, &ev_usr2);
+  ev_signal_start(loop, &ev_term);
+  ev_signal_start(loop, &ev_int);
+
+  signal(SIGPIPE, SIG_IGN);	/* in case logfile is FIFO */
+}
+
+/*
+ * End of signal handlers
+ */
+
+int main(int argc, char **argv) {
+  struct ev_loop *loop;
+
+  loop = ev_default_loop (0);
+
+  if (loop == NULL) {
+    syslog(LOG_CRIT, "cannot initialize event loop! bad $LIBEV_FLAGS in environment?");
+    abort ();
+  }
+
+  init(argc, argv, loop);
+  setup_signals(loop);
+  reopenlog();
+
+  if (recheck) {
+    ev_periodic recheck_ev;
+
+    ev_periodic_init(&recheck_ev, ev_reload_handler, recheck, recheck, 0);
+    ev_periodic_start(loop, &recheck_ev);
+  }
+
 #ifndef NO_STATS
   stats_time = time(NULL);
   if (statsfile)
     dumpstats_z();
 #endif
 
-  if (numsock == 1) {
-    /* optimized case for only one socket */
-    int fd = sock[0];
-    for(;;) {
-      if (signalled) do_signalled();
-      request(fd);
-    }
+  ev_io *io_evs = calloc(numsock, sizeof (ev_io));
+
+  if (io_evs == NULL) {
+    oom();
   }
-  else {
-    /* several sockets, do select/poll loop */
-#ifdef NO_POLL
-    fd_set rfds;
-    int maxfd = 0;
-    int *fdi, *fde = sock + numsock;
-    FD_ZERO(&rfds);
-    for (fdi = sock; fdi < fde; ++fdi) {
-      FD_SET(*fdi, &rfds);
-      if (*fdi > maxfd) maxfd = *fdi;
-    }
-    ++maxfd;
-    for(;;) {
-      fd_set rfd = rfds;
-      if (signalled) do_signalled();
-      if (select(maxfd, &rfd, NULL, NULL, NULL) <= 0)
-        continue;
-      for(fdi = sock; fdi < fde; ++fdi) {
-        if (FD_ISSET(*fdi, &rfd))
-          request(*fdi);
-      }
-    }
-#else /* !NO_POLL */
-    struct pollfd pfda[MAXSOCK];
-    struct pollfd *pfdi, *pfde = pfda + numsock;
-    int r;
-    for(r = 0; r < numsock; ++r) {
-      pfda[r].fd = sock[r];
-      make_socket_nonblocking(sock[r]);
-      pfda[r].events = POLLIN;
-    }
-    for(;;) {
-      if (signalled) do_signalled();
-      r = poll(pfda, numsock, -1);
-      if (r <= 0) continue;
-      for(pfdi = pfda; pfdi < pfde; ++pfdi) {
-        if (!(pfdi->revents & POLLIN)) continue;
-#ifdef WITH_RECVMMSG
-        request(pfdi->fd);
-#else
-        while (request(pfdi->fd) != -1) {}
-#endif
-        if (!--r) break;
-      }
-    }
-#endif /* NO_POLL */
+
+  for(int i = 0; i < numsock; ++i) {
+    make_socket_nonblocking(sock[i]);
+    ev_io_init(&io_evs[i], ev_request_handler, sock[i], EV_READ);
+    ev_io_start(loop, &io_evs[i]);
   }
+
+  ev_loop(loop, 0);
+
+  for(int i = 0; i < numsock; ++i) {
+    close(sock[i]);
+  }
+  free(io_evs);
+
+  return 0;
 }
 
 void oom(void) {
