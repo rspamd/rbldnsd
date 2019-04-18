@@ -13,6 +13,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <signal.h>
@@ -23,6 +24,7 @@
 #include <sys/wait.h>
 #include "ev.h"
 #include "rbldnsd.h"
+#include "sds/sds.h"
 
 
 #ifndef NO_SELECT_H
@@ -328,6 +330,106 @@ static int newsocket(struct addrinfo *ai) {
 }
 #endif
 
+static int newsocket_unix(const char *path)
+{
+  int nelts, i, fd;
+  sds *elts = sdssplitlen(path, strlen(path), ":", 1, &nelts);
+  struct sockaddr_un un;
+  unsigned mode = 00644;
+  size_t pwlen;
+  char *pwbuf, *p;
+  struct passwd pw, *ppw;
+  struct group gr, *pgr;
+  uid_t owner = (uid_t)-1;
+  gid_t group = (gid_t)-1;
+  int has_group = false;
+
+  if (nelts < 1) {
+    error(0, "invalid path: %s", path);
+  }
+
+  estrlcpy(un.sun_path, elts[0], sizeof (un.sun_path));
+#if defined(FREEBSD) || defined(__APPLE__)
+  un.sun_len = SUN_LEN (&un);
+#endif
+
+#ifdef _SC_GETPW_R_SIZE_MAX
+  pwlen = sysconf (_SC_GETPW_R_SIZE_MAX);
+  if (pwlen <= 0) {
+    pwlen = 8192;
+  }
+#else
+  pwlen = 8192;
+#endif
+
+  pwbuf = emalloc(pwlen);
+
+  for (i = 1; i < nelts; i ++) {
+    if (strncmp(elts[i], "mode=", sizeof ("mode=") - 1) == 0) {
+      p = strchr(elts[i], '=');
+      /* XXX: add error check */
+      mode = strtoul (p + 1, NULL, 8);
+
+      if (mode == 0) {
+        error(0, "bad mode: %s", p + 1);
+      }
+    }
+    else if (strncmp(elts[i], "owner=", sizeof ("owner=") - 1) == 0) {
+      p = strchr(elts[i], '=');
+
+      if (getpwnam_r(p + 1, &pw, pwbuf, pwlen, &ppw) != 0 || ppw == NULL) {
+        error(errno, "bad user: %s", p + 1);
+      }
+
+      owner = pw.pw_uid;
+
+      if (!has_group) {
+        group = pw.pw_gid;
+      }
+    }
+    else if (strncmp(elts[i], "group=", sizeof ("group=") - 1) == 0) {
+      p = strchr(elts[i], '=');
+
+      if (getgrnam_r(p + 1, &gr, pwbuf, pwlen, &pgr) != 0 || pgr == NULL) {
+        error(errno, "bad group: %s", p + 1);
+      }
+
+      has_group = true;
+      group = gr.gr_gid;
+    }
+  }
+
+  sdsfreesplitres(elts, nelts);
+  free(pwbuf);
+
+  fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+
+  if (fd == -1) {
+    error(errno, "unable to create socket");
+  }
+
+  if (bind(fd, (struct sockaddr *)&un, sizeof(un)) < 0) {
+    error(errno, "unable to bind to %s", path);
+  }
+
+  if (owner != (uid_t)-1 || group != (gid_t)-1) {
+    if (chown(un.sun_path, owner, group) == -1) {
+      error(errno, "cannot change owner for %s to %d:%d: %s",
+            un.sun_path, (int)owner, (int)group,
+            strerror(errno));
+    }
+  }
+
+  if (chmod(un.sun_path, mode) == -1) {
+    error(errno, "cannot change mode for %s to %od %s",
+          un.sun_path, mode, strerror(errno));
+  }
+
+  dslog(LOG_INFO, 0, "listening on %s", un.sun_path);
+  sock[numsock++] = fd;
+  return 1;
+}
+
 static void
 initsockets(const char *bindaddr[MAXSOCK], int nba, int UNUSED family) {
 
@@ -364,60 +466,66 @@ initsockets(const char *bindaddr[MAXSOCK], int nba, int UNUSED family) {
 
   for (i = 0; i < nba; ++i) {
     ba = bindaddr[i];
-    host = estrdup(ba);
 
-    serv = strchr(host, '/');
-    if (serv) {
-      *serv++ = '\0';
-      if (!*host)
-        error(0, "missing host part in bind address `%.60s'", ba);
+    if (ba[0] == '/' || ba[0] == '.') {
+      newsocket_unix(ba);
     }
+    else {
+      host = estrdup(ba);
+
+      serv = strchr(host, '/');
+      if (serv) {
+        *serv++ = '\0';
+        if (!*host)
+          error(0, "missing host part in bind address `%.60s'", ba);
+      }
 
 #ifdef NO_IPv6
 
-    if (!serv || !*serv)
-      sin.sin_port = port;
-    else if ((x = satoi(serv)) > 0 && x <= 0xffff)
-      sin.sin_port = htons(x);
-    else if (!(se = getservbyname(serv, "udp")))
-      error(0, "unknown service in `%.60s'", ba);
-    else
-      sin.sin_port = se->s_port;
+      if (!serv || !*serv)
+        sin.sin_port = port;
+      else if ((x = satoi(serv)) > 0 && x <= 0xffff)
+        sin.sin_port = htons(x);
+      else if (!(se = getservbyname(serv, "udp")))
+        error(0, "unknown service in `%.60s'", ba);
+      else
+        sin.sin_port = se->s_port;
 
-    if (ip4addr(host, &sinaddr, NULL) > 0) {
-      sin.sin_addr.s_addr = htonl(sinaddr);
-      newsocket(&sin);
-    }
-    else if (!(he = gethostbyname(host))
-             || he->h_addrtype != AF_INET
-             || he->h_length != 4
-             || !he->h_addr_list[0])
-      error(0, "unknown host in `%.60s'", ba);
-    else {
-      for(x = 0; he->h_addr_list[x]; ++x) {
-        memcpy(&sin.sin_addr, he->h_addr_list[x], 4);
+      if (ip4addr(host, &sinaddr, NULL) > 0) {
+        sin.sin_addr.s_addr = htonl(sinaddr);
         newsocket(&sin);
       }
-    }
+      else if (!(he = gethostbyname(host))
+               || he->h_addrtype != AF_INET
+               || he->h_length != 4
+               || !he->h_addr_list[0])
+        error(0, "unknown host in `%.60s'", ba);
+      else {
+        for(x = 0; he->h_addr_list[x]; ++x) {
+          memcpy(&sin.sin_addr, he->h_addr_list[x], 4);
+          newsocket(&sin);
+        }
+      }
 
 #else
 
-    if (!serv || !*serv)
-      serv = "domain";
+      if (!serv || !*serv)
+        serv = "domain";
 
-    x = getaddrinfo(host, serv, &hints, &aires);
-    if (x != 0)
-      error(0, "%.60s: %s", ba, gai_strerror(x));
-    for(ai = aires, x = 0; ai; ai = ai->ai_next)
-      if (newsocket(ai))
-        ++x;
-    if (!x)
-      error(0, "%.60s: no available protocols", ba);
-    freeaddrinfo(aires);
+      x = getaddrinfo(host, serv, &hints, &aires);
+      if (x != 0)
+        error(0, "%.60s: %s", ba, gai_strerror(x));
+      for (ai = aires, x = 0; ai; ai = ai->ai_next)
+        if (newsocket(ai))
+          ++x;
+      if (!x)
+        error(0, "%.60s: no available protocols", ba);
+      freeaddrinfo(aires);
 
 #endif
 
-    free(host);
+      free(host);
+    }
   }
   endservent();
   endhostent();
