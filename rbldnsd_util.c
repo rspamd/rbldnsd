@@ -500,6 +500,30 @@ char *estrdup(const char *str) {
   return ememdup(str, strlen(str) + 1);
 }
 
+size_t
+estrlcpy(char *dst, const char *src, size_t siz)
+{
+  char *d = dst;
+  size_t nleft = siz;
+
+  if (nleft != 0) {
+    while (--nleft != 0) {
+      if ((*d++ = *src++) == '\0') {
+        d --;
+        break;
+      }
+    }
+  }
+
+  if (nleft == 0) {
+    if (siz != 0) {
+      *d = '\0';
+    }
+  }
+
+  return (d - dst);
+}
+
 /* what a mess... this routine is to work around various snprintf
  * implementations.  It never return <1 or value greather than
  * size of buffer: i.e. it returns number of chars _actually written_
