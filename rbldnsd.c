@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h> /* for bool */
 #include <errno.h>
 #include <pwd.h>
 #include <grp.h>

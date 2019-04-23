@@ -4,6 +4,8 @@
 #include <stdarg.h>
 #include <sys/types.h>
 #include <stdio.h>
+#include <stdbool.h> /* for bool */
+#include <stdint.h> /* for bool */
 #include "config.h"
 #include "ip4addr.h"
 #include "ip6addr.h"
