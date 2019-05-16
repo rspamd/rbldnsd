@@ -1,0 +1,22 @@
+#!/usr/bin/make -f
+%:
+	dh $@ --with systemd
+
+.PHONY: override_dh_strip
+
+export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
+
+override_dh_auto_configure:
+	dh_auto_configure -- -DCMAKE_BUILD_TYPE=ReleaseWithDebInfo \
+		-DENABLE_JEMALLOC=ON \
+		-DENABLE_OPTIMIZATION=ON
+
+override_dh_strip:
+	dh_strip --dbg-package=rbldnsd-dbg
+
+override_dh_auto_install:
+	dh_installdirs /usr/sbin/
+	dh_installinit --restart-after-upgrade
+	dh_installman rbldnsd.8
+	dh_installdocs README.user TODO CHANGES-0.81
+	dh_installchangelogs NEWS

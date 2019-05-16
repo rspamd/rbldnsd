@@ -1,0 +1,14 @@
+This is the Debian GNU/Linux prepackaged version of rbldnsd.
+
+It has been packaged by Marco d'Itri <md@linux.it>.
+Package is maintaied by Vsevolod Stakhov <vsevolod@highsecure.ru>
+
+Original sources were obtained from:
+https://github.com/rspamd/rbldnsd
+
+Copyright (C) 2018-2019 Vsevolod Stakhov
+Copyright (C) 2016 The Spamhaus Project Ltd.
+Copyright (C) 2002 Michael Tokarev
+
+License: GPLv2+ (please see /usr/share/common-licenses/GPL-2).
+
