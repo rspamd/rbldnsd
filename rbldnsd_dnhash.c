@@ -73,9 +73,9 @@ struct dsdata {
 definedstype(dnhash, 0, "set of (domain name, value) pairs, hashed version");
 
 static void ds_dnhash_reset(struct dsdata *dsd, int UNUSED unused_freeall) {
-  kh_destroy(dnhash, dsd->direct);
+  kh_clear(dnhash, dsd->direct);
   for (int i = 0; i < MAX_WILDCARD; i ++) {
-    kh_destroy(dnhash, dsd->wild[i]);
+    kh_clear(dnhash, dsd->wild[i]);
   }
   dsd->w_maxlab = 0;
 }
@@ -85,9 +85,12 @@ static void ds_dnhash_start(struct dataset *ds) {
   ds->ds_dsd->def_rr = def_rr;
 
   dsd->w_maxlab = 0;
-  dsd->direct = kh_init(dnhash);
-  for (int i = 0; i < MAX_WILDCARD; i ++) {
-    dsd->wild[i] = kh_init(dnhash);
+
+  if (dsd->direct == NULL) {
+    dsd->direct = kh_init(dnhash);
+    for (int i = 0; i < MAX_WILDCARD; i++) {
+      dsd->wild[i] = kh_init(dnhash);
+    }
   }
 }
 
