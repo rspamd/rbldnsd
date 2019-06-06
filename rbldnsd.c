@@ -128,6 +128,7 @@ static struct zone *zonelist;	/* list of zones we're authoritative for */
 static int numzones;		/* number of zones in zonelist */
 int lazy;			/* don't return AUTH section by default */
 static int fork_on_reload;
+static int can_reload; /* block reload when another reload is there */
   /* >0 - perform fork on reloads, <0 - this is a child of reloading parent */
 #if STATS_IPC_IOVEC
 static struct iovec *stats_iov;
@@ -1057,8 +1058,23 @@ jemalloc_write_cb(void *ud, const char *msg)
 }
 #endif
 
+static void
+reload_cld_cb (EV_P_ ev_child *w, int revents)
+{
+  int cfd = (int)(uintptr_t)w->data;
+
+  ev_child_stop(EV_A_ w);
+  ipc_read_stats(cfd);
+  close(cfd);
+
+  printf ("process %d exited with status %x\n", w->rpid, w->rstatus);
+
+  can_reload = 1;
+}
+
 static int do_reload(int do_fork, struct ev_loop *loop) {
   int r;
+  ev_child ev_cld;
 #ifdef WITH_JEMALLOC
   char ibuf[8192];
 #else
@@ -1088,33 +1104,40 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
     if (flog && !flushlog)
       fflush(flog);
     /* forking reload. if anything fails, just do a non-forking one */
-    if (pipe(pfd) < 0)
+    if (pipe(pfd) < 0) {
       do_fork = 0;
+    }
     else if ((cpid = fork()) < 0) {	/* fork failed, close the pipe */
       close(pfd[0]);
       close(pfd[1]);
       do_fork = 0;
     }
-    else if (!cpid) {	/* child, continue answering queries */
-      ev_loop_fork(loop);
-      signal(SIGALRM, SIG_IGN);
-      signal(SIGHUP, SIG_IGN);
+
+    if (do_fork) {
+      if (!cpid) {  /* child, continue answering queries */
+        ev_loop_fork(loop);
+        signal(SIGALRM, SIG_IGN);
+        signal(SIGHUP, SIG_IGN);
 #ifndef NO_STATS
-      signal(SIGUSR1, SIG_IGN);
-      signal(SIGUSR2, SIG_IGN);
+        signal(SIGUSR1, SIG_IGN);
+        signal(SIGUSR2, SIG_IGN);
 #endif
-      close(pfd[0]);
-      /* set up the fd#1 to write stats later on SIGTERM */
-      if (pfd[1] != 1) {
-        dup2(pfd[1], 1);
+        close(pfd[0]);
+        /* set up the fd#1 to write stats later on SIGTERM */
+        if (pfd[1] != 1) {
+          dup2(pfd[1], 1);
+          close(pfd[1]);
+        }
+        fork_on_reload = -1;
+        return 1;
+      } else {
         close(pfd[1]);
+        cfd = pfd[0];
+        ev_child_init(&ev_cld, reload_cld_cb, cpid, 0);
+        ev_cld.data = (void *)(uintptr_t)(cfd);
+        ev_child_start(loop, &ev_cld);
+        can_reload = 0; /* Prevent reloading */
       }
-      fork_on_reload = -1;
-      return 1;
-    }
-    else {
-      close(pfd[1]);
-      cfd = pfd[0];
     }
   }
 
@@ -1209,30 +1232,9 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
   /* ok, (something) loaded. */
 
   if (do_fork) {
-    /* here we should notify query-answering child (send SIGTERM to it),
-     * and wait for it to complete.
-     * Unfortunately at least on linux, the SIGTERM sometimes gets ignored
-     * by the child process, so we're trying several times here, in a loop.
-     */
-    int s, n;
-    fd_set fds;
-    struct timeval tv;
-
-    for(n = 1; ++n;) {
-      if (kill(cpid, SIGTERM) != 0)
-        dslog(LOG_WARNING, 0, "kill(qchild): %s", strerror(errno));
-      FD_ZERO(&fds);
-      FD_SET(cfd, &fds);
-      tv.tv_sec = 0;
-      tv.tv_usec = 500000;
-      s = select(cfd+1, &fds, NULL, NULL, &tv);
-      if (s > 0) break;
-      dslog(LOG_WARNING, 0, "waiting for qchild process: %s, retrying",
-            s ? strerror(errno) : "timeout");
+    if (kill(cpid, SIGTERM) != 0) {
+      dslog(LOG_WARNING, 0, "kill(qchild): %s", strerror(errno));
     }
-    ipc_read_stats(cfd);
-    close(cfd);
-    wait(&s);
   }
 
   return r;
@@ -1348,11 +1350,16 @@ make_socket_nonblocking(int fd)
 static void
 ev_reload_handler (struct ev_loop *loop, ev_periodic *w, int revents)
 {
-  if (statsfile) {
-    dumpstats();
-  }
+  if (can_reload) {
+    if (statsfile) {
+      dumpstats();
+    }
 
-  do_reload(fork_on_reload, loop);
+    do_reload(fork_on_reload, loop);
+  }
+  else {
+    dslog(LOG_INFO, 0, "already reloading, ignore SIGHUP");
+  }
 }
 
 static void
@@ -1393,13 +1400,18 @@ ev_usr2_handler (struct ev_loop *loop, ev_signal *w, int revents)
 static void
 ev_hup_handler (struct ev_loop *loop, ev_signal *w, int revents)
 {
-  reopenlog();
+  if (can_reload) {
+    reopenlog();
 
-  if (statsfile) {
-    dumpstats();
+    if (statsfile) {
+      dumpstats();
+    }
+
+    do_reload(fork_on_reload, loop);
   }
-
-  do_reload(fork_on_reload, loop);
+  else {
+    dslog(LOG_INFO, 0, "already reloading, ignore SIGHUP");
+  }
 }
 
 static void
@@ -1460,6 +1472,7 @@ int main(int argc, char **argv) {
   init(argc, argv, loop);
   setup_signals(loop);
   reopenlog();
+  can_reload = 1;
 
   if (recheck) {
     ev_periodic recheck_ev;
