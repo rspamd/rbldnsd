@@ -114,6 +114,7 @@ unsigned dns_ptodn(const char *name, unsigned char *dn, unsigned dnsiz);
 /* convert asciiz string `name' to the DN format, return length or 0 */
 unsigned dns_dntop(const unsigned char *dn, char *dst, unsigned dstsiz);
 unsigned dns_dntol(const unsigned char *srcdn, unsigned char *dstdn);
+void dns_lc_len(unsigned char *str, unsigned len);
 #define dns_dnlc(c) ((c) >= 'A' && (c) <= 'Z' ? (c) - 'A' + 'a' : (c))
 unsigned dns_dnlen(const unsigned char *dn);
 unsigned dns_dnlabels(const unsigned char *dn);
