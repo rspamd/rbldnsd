@@ -130,6 +130,7 @@ int lazy;			/* don't return AUTH section by default */
 static int fork_on_reload;
 static int can_reload; /* block reload when another reload is there */
   /* >0 - perform fork on reloads, <0 - this is a child of reloading parent */
+static ev_signal ev_hup, ev_usr1, ev_usr2, ev_term, ev_int;
 #if STATS_IPC_IOVEC
 static struct iovec *stats_iov;
 #endif
@@ -1074,7 +1075,7 @@ reload_cld_cb (EV_P_ ev_child *w, int revents)
 
 static int do_reload(int do_fork, struct ev_loop *loop) {
   int r;
-  ev_child ev_cld;
+  static ev_child ev_cld;
 #ifdef WITH_JEMALLOC
   char ibuf[8192];
 #else
@@ -1116,12 +1117,10 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
     if (do_fork) {
       if (!cpid) {  /* child, continue answering queries */
         ev_loop_fork(loop);
-        signal(SIGALRM, SIG_IGN);
-        signal(SIGHUP, SIG_IGN);
-#ifndef NO_STATS
-        signal(SIGUSR1, SIG_IGN);
-        signal(SIGUSR2, SIG_IGN);
-#endif
+        ev_signal_stop(loop, &ev_hup);
+        ev_signal_stop(loop, &ev_usr1);
+        ev_signal_stop(loop, &ev_usr2);
+
         close(pfd[0]);
         /* set up the fd#1 to write stats later on SIGTERM */
         if (pfd[1] != 1) {
@@ -1421,7 +1420,8 @@ ev_term_handler (struct ev_loop *loop, ev_signal *w, int revents)
     ipc_write_stats(1);
     if (flog && !flushlog)
       fflush(flog);
-    _exit(0);
+    ev_break(loop, EVBREAK_ALL);
+    exit(0);
   }
 
   dslog(LOG_INFO, 0, "terminating");
@@ -1438,8 +1438,6 @@ ev_term_handler (struct ev_loop *loop, ev_signal *w, int revents)
 }
 
 static void setup_signals(struct ev_loop *loop) {
-  static ev_signal ev_hup, ev_usr1, ev_usr2, ev_term, ev_int;
-
   ev_signal_init(&ev_hup, ev_hup_handler, SIGHUP);
   ev_signal_init(&ev_usr1, ev_usr1_handler, SIGUSR1);
   ev_signal_init(&ev_usr2, ev_usr2_handler, SIGUSR2);
