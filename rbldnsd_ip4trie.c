@@ -31,7 +31,7 @@ static int
 ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   struct dsdata *dsd = ds->ds_dsd;
   ip4addr_t a;
-  btrie_oct_t addr_bytes[4];
+  btrie_oct_t addr_bytes[5];
   int bits;
   const char *rr;
   unsigned rrl;
