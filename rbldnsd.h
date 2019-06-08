@@ -303,7 +303,8 @@ findqzone(const struct zone *zonelist,
           struct dnsqinfo *qi);
 
 /* log a reply */
-void logreply(const struct dnspacket *pkt, FILE *flog, int flushlog, const struct dnsqinfo *qi);
+void logreply(const struct dnspacket *pkt, FILE *flog, int flushlog,
+    const struct dnsqinfo *qi, unsigned reply_len);
 
 /* details of DNS packet structure are in rbldnsd_packet.c */
 

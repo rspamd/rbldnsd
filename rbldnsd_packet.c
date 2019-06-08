@@ -992,7 +992,8 @@ static int version_req(struct dnspacket *pkt, const struct dnsquery *qry) {
   return 1;
 }
 
-void logreply(const struct dnspacket *pkt, FILE *flog, int flushlog, const struct dnsqinfo *qi) {
+void logreply(const struct dnspacket *pkt, FILE *flog,
+    int flushlog, const struct dnsqinfo *qi, unsigned reply_len) {
   char cbuf[DNS_MAXDOMAIN + IPSIZE + 51 + DNS_MAXLABEL];
   char *cp = cbuf;
   const unsigned char *const q = pkt->p_sans - 4;
@@ -1011,11 +1012,19 @@ void logreply(const struct dnspacket *pkt, FILE *flog, int flushlog, const struc
 #endif
   *cp++ = ' ';
   cp += dns_dntop(pkt->p_buf + p_hdrsize, cp, DNS_MAXDOMAIN);
-  cp += sprintf(cp, " %s %s: %s/%u/%d",
-                dns_typename(((unsigned) q[0] << 8) | q[1]),
-                dns_classname(((unsigned) q[2] << 8) | q[3]),
-                dns_rcodename(pkt->p_buf[p_f2] & pf2_rcode),
-                pkt->p_buf[p_ancnt2], (int) (pkt->p_cur - pkt->p_buf));
+
+  if (reply_len > 0) {
+    cp += sprintf(cp, " %s %s: %s/%u/%d",
+                  dns_typename(((unsigned) q[0] << 8) | q[1]),
+                  dns_classname(((unsigned) q[2] << 8) | q[3]),
+                  dns_rcodename(pkt->p_buf[p_f2] & pf2_rcode),
+                  pkt->p_buf[p_ancnt2], (int) (pkt->p_cur - pkt->p_buf));
+  }
+  else {
+    cp += sprintf(cp, " %s %s: drop",
+                  dns_typename(((unsigned) q[0] << 8) | q[1]),
+                  dns_classname(((unsigned) q[2] << 8) | q[3]));
+  }
 
   if (qi->qi_tflag & NSQUERY_KEY && qi->qi_additional) {
     int len = strlen(qi->qi_additional);

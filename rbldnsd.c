@@ -1295,10 +1295,8 @@ static int request(int fd) {
     pkt[i].p_peer = MSG_FIELD(msg[i], msg_name);
     replies_lengths[i] = replypacket(&pkt[i], q, zonelist, &qi);
 
-    if (replies_lengths[i]) {
-      if (flog) {
-        logreply(&pkt[i], flog, flushlog, &qi);
-      }
+    if (flog) {
+      logreply(&pkt[i], flog, flushlog, &qi, replies_lengths[i]);
     }
   }
 
