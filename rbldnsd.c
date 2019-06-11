@@ -1127,7 +1127,10 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
           dup2(pfd[1], 1);
           close(pfd[1]);
         }
+
         fork_on_reload = -1;
+        can_reload = 0; /* Deny reload for child process */
+
         return 1;
       } else {
         close(pfd[1]);
@@ -1355,7 +1358,7 @@ ev_reload_handler (struct ev_loop *loop, ev_periodic *w, int revents)
     do_reload(fork_on_reload, loop);
   }
   else {
-    dslog(LOG_INFO, 0, "already reloading, ignore SIGHUP");
+    dslog(LOG_INFO, 0, "already reloading, ignore periodic reload");
   }
 }
 
@@ -1471,7 +1474,7 @@ int main(int argc, char **argv) {
   can_reload = 1;
 
   if (recheck) {
-    ev_periodic recheck_ev;
+    static ev_periodic recheck_ev;
 
     ev_periodic_init(&recheck_ev, ev_reload_handler, recheck, recheck, 0);
     ev_periodic_start(loop, &recheck_ev);
