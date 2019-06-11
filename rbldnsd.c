@@ -665,11 +665,24 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
     case 'e': accept_in_cidr = 1; break;
     case 'l':
       logfile = optarg;
-      if (*logfile != '+') flushlog = 0;
-      else ++logfile, flushlog = 1;
-      if (!*logfile) logfile = NULL, flushlog = 0;
-      else if (logfile[0] == '-' && logfile[1] == '\0')
-        logfile = NULL, flog = stdout;
+
+      if (*logfile != '+') {
+        flushlog = 0;
+      }
+      else {
+        ++logfile;
+        flushlog = 1;
+      }
+
+      if (!*logfile) {
+        logfile = NULL;
+        flushlog = 0;
+      }
+      else if (logfile[0] == '-' && logfile[1] == '\0') {
+        /* No need to reopen stdout */
+        logfile = NULL;
+        flog = stdout;
+      }
       break;
 break;
     case 's':
@@ -1116,10 +1129,9 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 
     if (do_fork) {
       if (!cpid) {  /* child, continue answering queries */
+        fork_on_reload = -1;
+        can_reload = 0; /* Deny reload for child process */
         ev_loop_fork(loop);
-        ev_signal_stop(loop, &ev_hup);
-        ev_signal_stop(loop, &ev_usr1);
-        ev_signal_stop(loop, &ev_usr2);
 
         close(pfd[0]);
         /* set up the fd#1 to write stats later on SIGTERM */
@@ -1127,10 +1139,6 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
           dup2(pfd[1], 1);
           close(pfd[1]);
         }
-
-        fork_on_reload = -1;
-        can_reload = 0; /* Deny reload for child process */
-
         return 1;
       } else {
         close(pfd[1]);
@@ -1461,7 +1469,11 @@ static void setup_signals(struct ev_loop *loop) {
 int main(int argc, char **argv) {
   struct ev_loop *loop;
 
-  loop = ev_default_loop (0);
+#ifdef EVFLAG_SIGNALFD
+  loop = ev_default_loop(EVFLAG_SIGNALFD);
+#else
+  loop = ev_default_loop(0);
+#endif
 
   if (loop == NULL) {
     syslog(LOG_CRIT, "cannot initialize event loop! bad $LIBEV_FLAGS in environment?");
