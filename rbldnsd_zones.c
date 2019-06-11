@@ -54,7 +54,7 @@ static struct dataset *newdataset(char *spec) {
 
   dsfp = &ds->ds_dsf;
   for (f = strtok(f, delims); f; f = strtok(NULL, delims)) {
-    dsf = tmalloc(struct dsfile);
+    dsf = tzalloc(struct dsfile);
     dsf->dsf_stamp = 0;
     dsf->dsf_name = estrdup(f);
     *dsfp = dsf;
@@ -80,7 +80,7 @@ struct zone *newzone(struct zone **zonelist,
       if (mp)
         zone = mp_talloc(mp, struct zone);
       else
-        zone = tmalloc(struct zone);
+        zone = tzalloc(struct zone);
       if (!zone)
         return NULL;
       memset(zone, 0, sizeof(*zone));
@@ -171,7 +171,7 @@ struct zone *addzone(struct zone *zonelist, const char *spec) {
       zone->z_dsaclkey = ds;
     }
     else {
-      connectdataset(zone, ds, tmalloc(struct dslist));
+      connectdataset(zone, ds, tzalloc(struct dslist));
     }
   }
 
