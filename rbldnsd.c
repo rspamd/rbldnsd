@@ -1162,7 +1162,7 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 
   r = 1;
   while(ds) {
-    if (!loaddataset(ds))
+    if (!loaddataset(ds, loop))
       r = 0;
     ds = nextdataset2reload(ds);
   }
@@ -1356,22 +1356,24 @@ make_socket_nonblocking(int fd)
 }
 
 static void
-ev_reload_handler (struct ev_loop *loop, ev_periodic *w, int revents)
+ev_stat_handler(struct ev_loop *loop, ev_stat *w, int revents)
 {
   if (can_reload) {
     if (statsfile) {
       dumpstats();
     }
 
+    dslog(LOG_INFO, 0, "reload zones as file %s has been changed", w->path);
     do_reload(fork_on_reload, loop);
   }
   else {
-    dslog(LOG_INFO, 0, "already reloading, ignore periodic reload");
+    dslog(LOG_INFO, 0, "already reloading, ignore stat update for %s",
+        w->path);
   }
 }
 
 static void
-ev_request_handler (struct ev_loop *loop, ev_io *w, int revents)
+ev_request_handler(struct ev_loop *loop, ev_io *w, int revents)
 {
   request(w->fd);
 }
@@ -1390,7 +1392,7 @@ ev_usr1_handler (struct ev_loop *loop, ev_signal *w, int revents)
 }
 
 static void
-ev_usr2_handler (struct ev_loop *loop, ev_signal *w, int revents)
+ev_usr2_handler(struct ev_loop *loop, ev_signal *w, int revents)
 {
   if (statsfile) {
     dumpstats();
@@ -1406,7 +1408,7 @@ ev_usr2_handler (struct ev_loop *loop, ev_signal *w, int revents)
 }
 
 static void
-ev_hup_handler (struct ev_loop *loop, ev_signal *w, int revents)
+ev_hup_handler(struct ev_loop *loop, ev_signal *w, int revents)
 {
   if (can_reload) {
     reopenlog();
@@ -1468,6 +1470,8 @@ static void setup_signals(struct ev_loop *loop) {
 
 int main(int argc, char **argv) {
   struct ev_loop *loop;
+  ev_io *io_evs = NULL; /* Events for sockets */
+  ev_stat *stat_evs = NULL; /* Events for zone files */
 
 #ifdef EVFLAG_SIGNALFD
   loop = ev_default_loop(EVFLAG_SIGNALFD);
@@ -1485,20 +1489,13 @@ int main(int argc, char **argv) {
   reopenlog();
   can_reload = 1;
 
-  if (recheck) {
-    static ev_periodic recheck_ev;
-
-    ev_periodic_init(&recheck_ev, ev_reload_handler, recheck, recheck, 0);
-    ev_periodic_start(loop, &recheck_ev);
-  }
-
 #ifndef NO_STATS
   stats_time = time(NULL);
   if (statsfile)
     dumpstats_z();
 #endif
 
-  ev_io *io_evs = calloc(numsock, sizeof (ev_io));
+  io_evs = calloc(numsock, sizeof (ev_io));
 
   if (io_evs == NULL) {
     oom();
@@ -1510,12 +1507,45 @@ int main(int argc, char **argv) {
     ev_io_start(loop, &io_evs[i]);
   }
 
+  /* Also monitor zones for changes */
+  if (recheck) {
+    unsigned nds = 0;
+    struct dataset *ds = NULL;
+    struct dsfile *dsf = NULL;
+
+    while((ds = nextdataset(ds)) != NULL) {
+      for(dsf = ds->ds_dsf; dsf; dsf = dsf->dsf_next) {
+        nds++;
+      }
+    }
+
+    stat_evs = calloc(nds, sizeof(ev_stat));
+
+    if (stat_evs == NULL) {
+      oom();
+    }
+
+    nds = 0;
+    ds = NULL;
+
+    while((ds = nextdataset(ds)) != NULL) {
+      for(dsf = ds->ds_dsf; dsf; dsf = dsf->dsf_next) {
+        ev_stat_init(&stat_evs[nds], ev_stat_handler, dsf->dsf_name, recheck);
+        stat_evs[nds].data = dsf;
+        ev_stat_start(loop, &stat_evs[nds]);
+        dsf->stat_ev = &stat_evs[nds];
+        nds ++;
+      }
+    }
+  }
+
   ev_loop(loop, 0);
 
   for(int i = 0; i < numsock; ++i) {
     close(sock[i]);
   }
   free(io_evs);
+  free(stat_evs);
 
   return 0;
 }

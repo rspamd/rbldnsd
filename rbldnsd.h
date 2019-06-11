@@ -38,6 +38,8 @@ struct dsdata;
 struct dhdata;
 struct dsctx;
 struct sockaddr;
+struct ev_loop;
+struct ev_stat;
 
 struct dnspacket {		/* private structure */
   unsigned char p_buf[DNS_EDNS0_MAXPACKET]; /* packet buffer */
@@ -198,6 +200,7 @@ struct dsfile {	/* dsf */
   off_t  dsf_size;		/* last size of this file */
   struct dsfile *dsf_next;	/* next file in list */
   const char *dsf_name;		/* name of this file */
+  struct ev_stat *stat_ev;
 };
 
 struct dssoa { /* dssoa */
@@ -347,7 +350,8 @@ struct zone *newzone(struct zone **zonelist,
                      unsigned char *dn, unsigned dnlen,
                      struct mempool *mp);
 struct dataset *nextdataset2reload(struct dataset *ds);
-int loaddataset(struct dataset *ds);
+struct dataset *nextdataset(struct dataset *ds);
+int loaddataset(struct dataset *ds, struct ev_loop *loop);
 
 struct dsctx {
   struct dataset *dsc_ds;	/* currently loading dataset */

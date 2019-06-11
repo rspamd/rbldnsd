@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include <ev.h>
 #include "rbldnsd.h"
 #include "istream.h"
 
@@ -391,7 +392,7 @@ static void freedataset(struct dataset *ds) {
   memset(ds->ds_subst, 0, sizeof(ds->ds_subst));
 }
 
-int loaddataset(struct dataset *ds) {
+int loaddataset(struct dataset *ds, struct ev_loop *loop) {
   struct dsfile *dsf;
   time_t stamp = 0;
   struct istream is;
@@ -408,7 +409,7 @@ int loaddataset(struct dataset *ds) {
   for(dsf = ds->ds_dsf; dsf; dsf = dsf->dsf_next) {
     dsc.dsc_fname = dsf->dsf_name;
     fd = open(dsf->dsf_name, O_RDONLY);
-    if (fd < 0 || fstat(fd, &st0) < 0) {
+    if (fd < 0 || fstat(fd, &st0) == -1) {
       dslog(LOG_ERR, &dsc, "unable to open file: %s", strerror(errno));
       if (fd >= 0) close(fd);
       goto fail;
@@ -457,6 +458,10 @@ int loaddataset(struct dataset *ds) {
     dsf->dsf_size  = st0.st_size;
     if (dsf->dsf_stamp > stamp)
       stamp = dsf->dsf_stamp;
+
+    if (dsf->stat_ev) {
+      ev_stat_stat(loop, dsf->stat_ev);
+    }
   }
   ds->ds_stamp = stamp;
   dsc.dsc_fname = NULL;
@@ -485,6 +490,16 @@ struct dataset *nextdataset2reload(struct dataset *ds) {
           dsf->dsf_size  != st.st_size)
         return ds;
     }
+  return NULL;
+}
+
+struct dataset *nextdataset(struct dataset *ds) {
+  struct dsfile *dsf;
+  for (ds = ds ? ds->ds_next : ds_list; ds; ds = ds->ds_next) {
+    for (dsf = ds->ds_dsf; dsf; dsf = dsf->dsf_next) {
+      return ds;
+    }
+  }
   return NULL;
 }
 
