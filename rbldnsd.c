@@ -127,9 +127,9 @@ static int flushlog;		/* flush log after each line */
 static struct zone *zonelist;	/* list of zones we're authoritative for */
 static int numzones;		/* number of zones in zonelist */
 int lazy;			/* don't return AUTH section by default */
-static int fork_on_reload;
+static int fork_on_reload; /* >0 - perform fork on reloads, <0 - this is a child of reloading parent */
 static int can_reload; /* block reload when another reload is there */
-  /* >0 - perform fork on reloads, <0 - this is a child of reloading parent */
+static int pending_reload = 0;
 static ev_signal ev_hup, ev_usr1, ev_usr2, ev_term, ev_int;
 #if STATS_IPC_IOVEC
 static struct iovec *stats_iov;
@@ -1081,9 +1081,14 @@ reload_cld_cb (EV_P_ ev_child *w, int revents)
   ipc_read_stats(cfd);
   close(cfd);
 
-  printf ("process %d exited with status %x\n", w->rpid, w->rstatus);
+  dslog(LOG_INFO, 0, "process %d exited with status %x\n", w->rpid, w->rstatus);
 
   can_reload = 1;
+
+  if (pending_reload) {
+    dslog(LOG_INFO, 0, "perform delayed reload");
+    do_reload(fork_on_reload, loop);
+  }
 }
 
 static int do_reload(int do_fork, struct ev_loop *loop) {
@@ -1107,6 +1112,7 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 #endif
 #endif /* NO_TIMES */
 
+  pending_reload = 0;
   ds = nextdataset2reload(NULL);
   if (!ds && call_hook(reload_check, (zonelist)) == 0) {
     check_expires();
@@ -1134,10 +1140,9 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
         ev_loop_fork(loop);
 
         close(pfd[0]);
-        /* set up the fd#1 to write stats later on SIGTERM */
+        /* Store our pipe end in fork_on_reload poor var */
         if (pfd[1] != 1) {
-          dup2(pfd[1], 1);
-          close(pfd[1]);
+          fork_on_reload = -(pfd[1]);
         }
         return 1;
       } else {
@@ -1367,6 +1372,7 @@ ev_stat_handler(struct ev_loop *loop, ev_stat *w, int revents)
     do_reload(fork_on_reload, loop);
   }
   else {
+    pending_reload = 1;
     dslog(LOG_INFO, 0, "already reloading, ignore stat update for %s",
         w->path);
   }
@@ -1404,7 +1410,13 @@ ev_usr2_handler(struct ev_loop *loop, ev_signal *w, int revents)
     dumpstats_z();
   }
 
-  do_reload(fork_on_reload, loop);
+  if (can_reload) {
+    do_reload(fork_on_reload, loop);
+  }
+  else {
+    pending_reload = 1;
+    dslog(LOG_INFO, 0, "already reloading, ignore reload on SIGUSR2");
+  }
 }
 
 static void
@@ -1420,6 +1432,7 @@ ev_hup_handler(struct ev_loop *loop, ev_signal *w, int revents)
     do_reload(fork_on_reload, loop);
   }
   else {
+    pending_reload = 1;
     dslog(LOG_INFO, 0, "already reloading, ignore SIGHUP");
   }
 }
@@ -1428,14 +1441,18 @@ static void
 ev_term_handler (struct ev_loop *loop, ev_signal *w, int revents)
 {
   if (fork_on_reload < 0) { /* this is a temp child; dump stats and exit */
-    ipc_write_stats(1);
-    if (flog && !flushlog)
+    dslog(LOG_INFO, 0, "temp worker received terminating signal %s",
+        strsignal(w->signum));
+    /* pipe end is stored in fork_on_reload for a child */
+    ipc_write_stats(-(fork_on_reload));
+    if (flog && !flushlog) {
       fflush(flog);
+    }
     ev_break(loop, EVBREAK_ALL);
     exit(0);
   }
 
-  dslog(LOG_INFO, 0, "terminating");
+  dslog(LOG_INFO, 0, "terminating after %s", strsignal(w->signum));
 #ifndef NO_STATS
   if (statsfile) {
     dumpstats();
