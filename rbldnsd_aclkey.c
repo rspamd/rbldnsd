@@ -31,7 +31,6 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include "rbldnsd.h"
-#include "btrie.h"
 #include "khash.h"
 #include "t1ha/t1ha.h"
 
@@ -230,6 +229,11 @@ int ds_aclkey_query(const struct dataset *ds, struct dnsqinfo *qi,
   khiter_t k;
   struct acl_key key;
   int add_flags = 0;
+
+  if (qi->qi_tflag & (NSQUERY_NS|NSQUERY_SOA)) {
+    /* Skip SOA/NS queries when checking acl keys */
+    return 0;
+  }
 
   if (qi->qi_dnlab <= 1) {
     rr = ds->ds_dsd->def_rr;
