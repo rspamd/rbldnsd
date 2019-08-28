@@ -363,7 +363,7 @@ readdslines(struct istream *sp, struct dataset *ds, struct dsctx *dsc) {
         ((ISCOMMENT(line[0]) || line[0] == ':') && line[1] == '$')) {
       int r = ds_special(ds, line[0] == '$' ? line + 1 : line + 2, dsc);
       if (!r)
-        dswarn(dsc, "invalid or unrecognized special entry");
+        dswarn(dsc, "invalid or unrecognized special entry: %s", line);
       else if (r < 0)
         return 0;
       dscur = dsc->dsc_subset ? dsc->dsc_subset : ds;

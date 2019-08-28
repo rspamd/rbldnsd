@@ -597,7 +597,7 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
   int nba = 0;
   uid_t uid = 0;
   gid_t gid = 0;
-  int nodaemon = 0, quickstart = 0, dump = 0, nover = 0, forkon = 0;
+  int nodaemon = 0, quickstart = 0, dump = 0, nover = 0, forkon = 0, dry_run = 0;
   int family = AF_UNSPEC;
   int cfd = -1;
   const struct zone *z;
@@ -613,7 +613,7 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
 
   if (argc <= 1) usage(1);
 
-  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:")) != EOF)
+  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:D")) != EOF)
     switch(c) {
     case 'u': user = optarg; break;
     case 'r': rootdir = optarg; break;
@@ -699,11 +699,9 @@ break;
       break;
     case 'q': quickstart = 1; break;
     case 'd':
-#ifdef NO_MASTER_DUMP
-      error(0, "master-format dump option (-d) isn't compiled in");
-#endif
       dump = 1;
       break;
+    case 'D': dry_run = 1; break;
     case 'v': show_version = nover++ ? NULL : "rbldnsd"; break;
     case 'a': lazy = 1; break;
     case 'A': lazy = 0; break;
@@ -727,8 +725,7 @@ break;
     error(0, "no zone(s) to service specified (-h for help)");
   argv += optind;
 
-#ifndef NO_MASTER_DUMP
-  if (dump) {
+  if (dump || dry_run) {
     time_t now;
     logto = LOGTO_STDERR;
     for(c = 0; c < argc; ++c)
@@ -740,15 +737,23 @@ break;
       error(errno, "unable to chdir to %.50s", workdir);
     if (!do_reload(0, loop))
       error(0, "zone loading errors, aborting");
-    now = time(NULL);
-    printf("; zone dump made %s", ctime(&now));
-    printf("; rbldnsd version %s\n", version);
-    for (z = zonelist; z; z = z->z_next)
-      dumpzone(z, stdout);
-    fflush(stdout);
-    exit(ferror(stdout) ? 1 : 0);
+
+    if (dump) {
+      now = time(NULL);
+      printf("; zone dump made %s", ctime(&now));
+      printf("; rbldnsd version %s\n", version);
+      for (z = zonelist; z; z = z->z_next)
+        dumpzone(z, stdout);
+      fflush(stdout);
+      exit(ferror(stdout) ? 1 : 0);
+    }
+    else {
+      /* Dry run */
+      printf("zones loaded successfully\n");
+      fflush(stdout);
+      exit(ferror(stdout) ? 1 : 0);
+    }
   }
-#endif
 
   if (!nba)
     error(0, "no address to listen on (-b option) specified");
