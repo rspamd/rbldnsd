@@ -19,7 +19,7 @@
  */
 
 /*
- * Hashed dataset with no wirldcards
+ * Hashed dataset with wildcards
  */
 
 #include <stdio.h>
