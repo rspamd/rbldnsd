@@ -301,7 +301,7 @@ struct dsdata {
   int w_maxlab;
 };
 
-definedstype(dnhash, 0, "set of (domain name, value) pairs, hashed version");
+definedstype_update(dnhash, 0, "set of (domain name, value) pairs, hashed version");
 
 static void ds_dnhash_reset(struct dsdata *dsd, int UNUSED unused_freeall) {
   kh_clear(dnhash, dsd->direct);
@@ -440,6 +440,10 @@ ds_dnhash_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   return 1;
 }
 
+static int
+ds_dnhash_update(struct dataset *ds, char *s, struct dsctx *dsc) {
+  return ds_dnhash_line(ds, s, dsc);
+}
 
 static void ds_dnhash_finish(struct dataset *ds, struct dsctx *dsc) {
   struct dsdata *dsd = ds->ds_dsd;
