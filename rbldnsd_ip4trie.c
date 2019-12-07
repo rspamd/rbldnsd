@@ -13,7 +13,7 @@ struct dsdata {
   const char *def_rr;	/* default RR */
 };
 
-definedstype(ip4trie, DSTF_IP4REV, "set of (ip4cidr or ip6cidr, value) pairs");
+definedstype_update(ip4trie, DSTF_IP4REV, "set of (ip4cidr or ip6cidr, value) pairs");
 
 static void ds_ip4trie_reset(struct dsdata *dsd, int UNUSED unused_freeall) {
   memset(dsd, 0, sizeof(*dsd));
@@ -28,7 +28,8 @@ static void ds_ip4trie_start(struct dataset *ds) {
 }
 
 static int
-ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc) {
+ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
+{
   struct dsdata *dsd = ds->ds_dsd;
   ip4addr_t a;
   btrie_oct_t addr_bytes[5];
@@ -130,6 +131,14 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc) {
     return 0;                   /* oom */
   }
 }
+
+static int
+ds_ip4trie_update(struct dataset *ds, char *s, struct dsctx *dsc)
+{
+  /* Exactly the same for updates */
+  return ds_ip4trie_line(ds, s, dsc);
+}
+
 
 static void ds_ip4trie_finish(struct dataset *ds, struct dsctx *dsc) {
   dsloaded(dsc, "%s", btrie_stats(ds->ds_dsd->btrie));

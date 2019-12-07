@@ -104,6 +104,7 @@ typedef void ds_startfn_t(struct dataset *ds);
 typedef int ds_linefn_t(struct dataset *ds, char *line, struct dsctx *dsc);
 typedef void ds_finishfn_t(struct dataset *ds, struct dsctx *dsc);
 typedef void ds_resetfn_t(struct dsdata *dsd, int freeall);
+typedef int ds_updatefn_t(struct dataset *ds, char *line, struct dsctx *dsc);
 typedef int
 ds_queryfn_t(const struct dataset *ds, const struct dnsqinfo *qi,
              struct dnspacket *pkt);
@@ -147,6 +148,7 @@ struct dstype {	/* dst */
   ds_finishfn_t *dst_finishfn;	/* finish loading */
   ds_queryfn_t *dst_queryfn;	/* routine to perform query */
   ds_dumpfn_t *dst_dumpfn;	/* dump zone in BIND format */
+  ds_updatefn_t *dst_updatefn;	/* routine to perform dynamic update */
   const char *dst_descr;    	/* short description of a ds type */
 };
 
@@ -167,7 +169,21 @@ struct dstype {	/* dst */
  const struct dstype dataset_##t##_type = { \
    #t /* name */, flags, sizeof(struct dsdata), \
    ds_##t##_reset, ds_##t##_start, ds_##t##_line, ds_##t##_finish, \
-   ds_##t##_query, ds_##t##_dump, \
+   ds_##t##_query, ds_##t##_dump, NULL, \
+   descr }
+#define definedstype_update(t, flags, descr) \
+ static ds_resetfn_t ds_##t##_reset; \
+ static ds_startfn_t ds_##t##_start; \
+ static ds_linefn_t ds_##t##_line; \
+ static ds_finishfn_t ds_##t##_finish; \
+ static ds_queryfn_t ds_##t##_query; \
+ static ds_dumpfn_t ds_##t##_dump; \
+ static ds_updatefn_t ds_##t##_update; \
+ _master_dump_body(ds_##t##_dump) \
+ const struct dstype dataset_##t##_type = { \
+   #t /* name */, flags, sizeof(struct dsdata), \
+   ds_##t##_reset, ds_##t##_start, ds_##t##_line, ds_##t##_finish, \
+   ds_##t##_query, ds_##t##_dump, ds_##t##_update, \
    descr }
 
 declaredstype(ip4set);

@@ -1280,6 +1280,11 @@ add_to_trie(struct btrie *btrie, node_t *node, unsigned pos,
       }
       else if (clen == end && len == end && lc_is_terminal(lc_node)) {
         /* exact match for terminal node - already have data for prefix */
+        /* ret, ret, ret! allow data rewriting */
+        if (lc_node->ptr.data != data) {
+          lc_node->ptr.data = data;
+        }
+
         return BTRIE_DUPLICATE_PREFIX;
       }
       else {
