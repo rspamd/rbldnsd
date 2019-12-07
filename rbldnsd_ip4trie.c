@@ -13,7 +13,7 @@ struct dsdata {
   const char *def_rr;	/* default RR */
 };
 
-definedstype(ip4trie, DSTF_IP4REV, "set of (ip4cidr, value) pairs");
+definedstype(ip4trie, DSTF_IP4REV, "set of (ip4cidr or ip6cidr, value) pairs");
 
 static void ds_ip4trie_reset(struct dsdata *dsd, int UNUSED unused_freeall) {
   memset(dsd, 0, sizeof(*dsd));
@@ -32,11 +32,12 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   struct dsdata *dsd = ds->ds_dsd;
   ip4addr_t a;
   btrie_oct_t addr_bytes[5];
+  ip6oct_t ipv6_addr[IP6ADDR_FULL];
   int bits;
   const char *rr;
   unsigned rrl;
 
-  int not;
+  int not, ipv6 = 0;
 
   if (*s == ':') {
     if (!(rrl = parse_a_txt(s, &rr, def_rr, dsc)))
@@ -48,26 +49,49 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc) {
 
   if (*s == '!') {
     not = 1;
-    ++s; SKIPSPACE(s);
+    ++s;
+    SKIPSPACE(s);
   }
-  else
+  else {
     not = 0;
-  if ((bits = ip4cidr(s, &a, &s)) < 0 ||
-      (*s && !ISSPACE(*s) && !ISCOMMENT(*s) && *s != ':')) {
+  }
+
+  /* First try ip4 */
+  if ((bits = ip4cidr(s, &a, &s)) < 0) {
+    /* Probably v6 address */
+    bits = ip6cidr(s, ipv6_addr, &s);
+
+    if (bits >= 0) {
+      ipv6 = 1;
+    }
+  }
+  if (bits < 0 || (*s && !ISSPACE(*s) && !ISCOMMENT(*s) && *s != ':')) {
     dswarn(dsc, "invalid address: %s", s);
     return 0;
   }
-  if (accept_in_cidr)
-    a &= ip4mask(bits);
-  else if (a & ~ip4mask(bits)) {
-    dswarn(dsc, "invalid range (non-zero host part): %s", s);
-    return 0;
+
+  if (!ipv6) {
+    if (accept_in_cidr)
+      a &= ip4mask(bits);
+    else if (a & ~ip4mask(bits)) {
+      dswarn(dsc, "invalid range (non-zero host part): %s", s);
+      return 0;
+    }
+    if (dsc->dsc_ip4maxrange && dsc->dsc_ip4maxrange <= ~ip4mask(bits)) {
+      dswarn(dsc, "too large range (%u) ignored (%u max)",
+             ~ip4mask(bits) + 1, dsc->dsc_ip4maxrange);
+      return 1;
+    }
   }
-  if (dsc->dsc_ip4maxrange && dsc->dsc_ip4maxrange <= ~ip4mask(bits)) {
-    dswarn(dsc, "too large range (%u) ignored (%u max)",
-           ~ip4mask(bits) + 1, dsc->dsc_ip4maxrange);
-    return 1;
+  else {
+    int non_zero_host = ip6mask(ipv6_addr, ipv6_addr, IP6ADDR_FULL, bits);
+
+    if (non_zero_host && !accept_in_cidr) {
+      dswarn(dsc, "invalid range (non-zero host part)");
+      return 1;
+    }
   }
+
   if (not)
     rr = NULL;
   else {
@@ -80,12 +104,26 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc) {
       return 0;
   }
 
-  ip4unpack(addr_bytes, a);
-  switch(btrie_add_prefix(dsd->btrie, addr_bytes, bits, rr)) {
+  int ret = -1;
+
+  if (ipv6) {
+    ret = btrie_add_prefix(dsd->btrie, ipv6_addr, bits, rr);
+  }
+  else {
+    ip4unpack(addr_bytes, a);
+    ret = btrie_add_prefix(dsd->btrie, addr_bytes, bits, rr);
+  }
+
+  switch(ret) {
   case BTRIE_OKAY:
     return 1;
   case BTRIE_DUPLICATE_PREFIX:
-    dswarn(dsc, "duplicated entry for %s/%d", ip4atos(a), bits);
+    if (ipv6) {
+      dswarn(dsc, "duplicated entry for %s/%d", ip4atos(a), bits);
+    }
+    else {
+      dswarn(dsc, "duplicated entry for %s/%d", ip6atos(ipv6_addr, IP6ADDR_FULL), bits);
+    }
     return 1;
   case BTRIE_ALLOC_FAILED:
   default:
@@ -103,17 +141,37 @@ ds_ip4trie_query(const struct dataset *ds, const struct dnsqinfo *qi,
   const char *rr;
   btrie_oct_t addr_bytes[4];
 
-  if (!qi->qi_ip4valid) return 0;
-  check_query_overwrites(qi);
+  if (qi->qi_ip4valid) {
+    check_query_overwrites(qi);
 
-  ip4unpack(addr_bytes, qi->qi_ip4);
-  rr = btrie_lookup(ds->ds_dsd->btrie, addr_bytes, 32);
+    ip4unpack(addr_bytes, qi->qi_ip4);
+    rr = btrie_lookup(ds->ds_dsd->btrie, addr_bytes, 32);
+  }
+  else if (qi->qi_ip6valid) {
+    check_query_overwrites(qi);
+
+    rr = btrie_lookup(ds->ds_dsd->btrie, qi->qi_ip6, 8 * IP6ADDR_FULL);
+  }
+  else {
+    return 0;
+  }
 
   if (!rr)
     return 0;
 
-  addrr_a_txt(pkt, qi->qi_tflag, rr,
-              qi->qi_tflag & NSQUERY_TXT ? ip4atos(qi->qi_ip4) : NULL, ds);
+  const char *subst = NULL;
+
+  if (qi->qi_tflag & NSQUERY_TXT) {
+    if (qi->qi_ip4valid) {
+      subst = ip4atos(qi->qi_ip4);
+    }
+    else {
+      subst = ip6atos(qi->qi_ip6, IP6ADDR_FULL);
+    }
+  }
+
+  addrr_a_txt(pkt, qi->qi_tflag, rr, subst, ds);
+
   return NSQUERY_FOUND;
 }
 
@@ -152,7 +210,7 @@ dump_cb(const btrie_oct_t *prefix, unsigned len, const void *data, int post,
   ip4addr_t addr;
 
   if (len > 32)
-    return;                     /* paranoia */
+    return;                     /* paranoia (or ipv6 for now, gah) */
   addr = (prefix[0] << 24) + (prefix[1] << 16) + (prefix[2] << 8) + prefix[3];
   addr &= len ? -((ip4addr_t)1 << (32 - len)) : 0;
 
