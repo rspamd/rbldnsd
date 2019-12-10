@@ -279,12 +279,13 @@ extern struct dnsstats gstats;	/* global statistics counters */
 #define MAX_NS 32
 
 struct zone {	/* zone, list of zones */
-  unsigned z_stamp;			/* timestamp, 0 if not loaded */
-  time_t z_expires;			/* when the zone expires if any */
   unsigned char z_dn[DNS_MAXDN+1];	/* zone domain name */
+  time_t z_expires;			/* when the zone expires if any */
   unsigned z_dnlen;			/* length of z_dn */
   unsigned z_dnlab;			/* number of dn labels */
   unsigned z_dstflags;			/* flags of all datasets */
+  unsigned z_stamp;			/* timestamp, 0 if not loaded */
+  const char *z_name; /* normal name, stored externally */
   struct dslist *z_dsl;			/* list of datasets */
   struct dslist **z_dslp;		/* last z_dsl in list */
   struct dataset *z_dsacl;		/* zone ACL */
@@ -364,6 +365,7 @@ void connectdataset(struct zone *zone,
                     struct dslist *dsl);
 struct zone *newzone(struct zone **zonelist,
                      unsigned char *dn, unsigned dnlen,
+                     const char *zname,
                      struct mempool *mp);
 struct dataset *nextdataset2reload(struct dataset *ds);
 struct dataset *nextdataset(struct dataset *ds);

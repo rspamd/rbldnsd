@@ -69,6 +69,7 @@ static struct dataset *newdataset(char *spec) {
 
 struct zone *newzone(struct zone **zonelist,
                      unsigned char *dn, unsigned dnlen,
+                     const char *zname,
                      struct mempool *mp) {
   struct zone *zone, **zonep, **lastzonep;
 
@@ -77,12 +78,20 @@ struct zone *newzone(struct zone **zonelist,
 
   for (;;) {
     if (!(zone = *zonep)) {
-      if (mp)
+      if (mp) {
         zone = mp_talloc(mp, struct zone);
-      else
+        if (!zone)
+          return NULL;
+
+        zone->z_name = mp_dstrdup(mp, zname);
+      } else {
         zone = tzalloc(struct zone);
-      if (!zone)
-        return NULL;
+        if (!zone)
+          return NULL;
+
+        zone->z_name = estrdup(zname);
+      }
+
       memset(zone, 0, sizeof(*zone));
       if (lastzonep) { zone->z_next = *lastzonep; *lastzonep = zone; }
       else *zonep = zone;
@@ -159,7 +168,7 @@ struct zone *addzone(struct zone *zonelist, const char *spec) {
     }
   }
   else {
-    zone = newzone(&zonelist, dn, dnlen, NULL);
+    zone = newzone(&zonelist, dn, dnlen, name, NULL);
     if (isdstype(ds->ds_type, acl)) {
       if (zone->z_dsacl)
         error(0, "repeated ACL definition for zone `%.60s'", name);

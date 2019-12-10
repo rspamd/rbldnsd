@@ -121,6 +121,7 @@ const char def_rr[5] = "\177\0\0\2\0";		/* default A RR */
 
 #define MAXSOCK	20	/* maximum # of supported sockets */
 static int sock[MAXSOCK];	/* array of active sockets */
+static int update_sock = -1; /* used for dynamic updates */
 static int numsock;		/* number of active sockets in sock[] */
 static FILE *flog;		/* log file */
 static int flushlog;		/* flush log after each line */
@@ -194,6 +195,7 @@ static void NORETURN usage(int exitcode) {
 "  during reload (may double memory requiriments)\n"
 " -q - quickstart, load zones after backgrounding\n"
 " -l [+]logfile - log queries and answers to this file (+ for unbuffered)\n"
+" -U address/port or unix socket - socket credentials for updates\n"
 #ifndef NO_STATS
 " -s [+]statsfile - write a line with short statistics summary into this\n"
 "  file every `check' (-c) secounds, for rrdtool-like applications\n"
@@ -313,7 +315,7 @@ static int newsocket(struct addrinfo *ai) {
   char host[NI_MAXHOST], serv[NI_MAXSERV];
 
   if (already_bound(ai->ai_addr, ai->ai_addrlen))
-    return 1;
+    return -1;
   if (numsock >= MAXSOCK)
     error(0, "too many listening sockets (%d max)", MAXSOCK);
   fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
@@ -328,8 +330,8 @@ static int newsocket(struct addrinfo *ai) {
         error(errno, "unable to bind to %s/%s", host, serv);
 
   dslog(LOG_INFO, 0, "listening on %s/%s", host, serv);
-  sock[numsock++] = fd;
-  return 1;
+
+  return fd;
 }
 #endif
 
@@ -412,7 +414,7 @@ static int newsocket_unix(const char *path)
   }
 
   if (bind(fd, (struct sockaddr *)&un, sizeof(un)) < 0) {
-    error(errno, "unable to bind to %s", path);
+    error(errno, "unable to bind to unix socket: %s", path);
   }
 
   if (owner != (uid_t)-1 || group != (gid_t)-1) {
@@ -429,34 +431,15 @@ static int newsocket_unix(const char *path)
   }
 
   dslog(LOG_INFO, 0, "listening on %s", un.sun_path);
-  sock[numsock++] = fd;
-  return 1;
+  return fd;
 }
 
-static void
-initsockets(const char *bindaddr[MAXSOCK], int nba, int UNUSED family) {
+static int
+initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family) {
 
-  int i, x;
+  int i, x, cur_sock = 0;
   char *host, *serv;
   const char *ba;
-
-#ifdef NO_IPv6
-
-  struct sockaddr_in sin;
-  ip4addr_t sinaddr;
-  int port;
-  struct servent *se;
-  struct hostent *he;
-
-  memset(&sin, 0, sizeof(sin));
-  sin.sin_family = AF_INET;
-
-  if (!(se = getservbyname("domain", "udp")))
-    port = htons(DNS_PORT);
-  else
-    port = se->s_port;
-
-#else
 
   struct addrinfo hints, *aires, *ai;
 
@@ -465,13 +448,15 @@ initsockets(const char *bindaddr[MAXSOCK], int nba, int UNUSED family) {
   hints.ai_socktype = SOCK_DGRAM;
   hints.ai_flags = AI_PASSIVE;
 
-#endif
-
   for (i = 0; i < nba; ++i) {
     ba = bindaddr[i];
 
     if (ba[0] == '/' || ba[0] == '.') {
-      newsocket_unix(ba);
+      int nfd = newsocket_unix(ba);
+
+      if (nfd != -1) {
+        dest[cur_sock++] = nfd;
+      }
     }
     else {
       host = estrdup(ba);
@@ -483,63 +468,38 @@ initsockets(const char *bindaddr[MAXSOCK], int nba, int UNUSED family) {
           error(0, "missing host part in bind address `%.60s'", ba);
       }
 
-#ifdef NO_IPv6
-
-      if (!serv || !*serv)
-        sin.sin_port = port;
-      else if ((x = satoi(serv)) > 0 && x <= 0xffff)
-        sin.sin_port = htons(x);
-      else if (!(se = getservbyname(serv, "udp")))
-        error(0, "unknown service in `%.60s'", ba);
-      else
-        sin.sin_port = se->s_port;
-
-      if (ip4addr(host, &sinaddr, NULL) > 0) {
-        sin.sin_addr.s_addr = htonl(sinaddr);
-        newsocket(&sin);
-      }
-      else if (!(he = gethostbyname(host))
-               || he->h_addrtype != AF_INET
-               || he->h_length != 4
-               || !he->h_addr_list[0])
-        error(0, "unknown host in `%.60s'", ba);
-      else {
-        for(x = 0; he->h_addr_list[x]; ++x) {
-          memcpy(&sin.sin_addr, he->h_addr_list[x], 4);
-          newsocket(&sin);
-        }
-      }
-
-#else
-
       if (!serv || !*serv)
         serv = "domain";
 
       x = getaddrinfo(host, serv, &hints, &aires);
       if (x != 0)
         error(0, "%.60s: %s", ba, gai_strerror(x));
-      for (ai = aires, x = 0; ai; ai = ai->ai_next)
-        if (newsocket(ai))
+      for (ai = aires, x = 0; ai; ai = ai->ai_next) {
+        int nfd = newsocket(ai);
+        if (nfd != -1) {
           ++x;
+          dest[cur_sock++] = nfd;
+        }
+      }
       if (!x)
         error(0, "%.60s: no available protocols", ba);
       freeaddrinfo(aires);
-
-#endif
-
       free(host);
     }
   }
   endservent();
   endhostent();
 
-  for (i = 0; i < numsock; ++i) {
+  for (i = 0; i < cur_sock; ++i) {
     x = 65536;
-    do
-      if (setsockopt(sock[i], SOL_SOCKET, SO_RCVBUF, (void*)&x, sizeof x) == 0)
+    do {
+      if (setsockopt(dest[i], SOL_SOCKET, SO_RCVBUF, (void *) &x, sizeof x) == 0) {
         break;
-    while ((x -= (x >> 5)) >= 1024);
+      }
+    } while ((x -= (x >> 5)) >= 1024);
   }
+
+  return cur_sock;
 }
 
 static struct {
@@ -593,6 +553,7 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
   const char *user = NULL;
   const char *rootdir = NULL, *workdir = NULL, *pidfile = NULL, *facility = NULL;
   const char *bindaddr[MAXSOCK];
+  const char *update_addr = NULL;
   int logfacility;
   int nba = 0;
   uid_t uid = 0;
@@ -613,7 +574,7 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
 
   if (argc <= 1) usage(1);
 
-  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:D")) != EOF)
+  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:")) != EOF)
     switch(c) {
     case 'u': user = optarg; break;
     case 'r': rootdir = optarg; break;
@@ -621,6 +582,9 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
       if (nba >= MAXSOCK)
         error(0, "too many addresses to listen on (%d max)", MAXSOCK);
       bindaddr[nba++] = optarg;
+      break;
+    case 'U':
+      update_addr = optarg;
       break;
 #ifndef NO_IPv6
     case '4': family = AF_INET; break;
@@ -794,7 +758,13 @@ break;
     if (!quickstart && !flog) logto |= LOGTO_STDOUT;
   }
 
-  initsockets(bindaddr, nba, family);
+  numsock = initsockets(bindaddr, sock, nba, family);
+
+  if (update_addr) {
+    if (initsockets(&update_addr, &update_sock, 1, family) != 1) {
+      error(0, "unable to listen for updates on `%s'", update_addr);
+    }
+  }
 
 #ifndef NO_DSO
   if (ext) {
@@ -1389,6 +1359,68 @@ ev_request_handler(struct ev_loop *loop, ev_io *w, int revents)
   request(w->fd);
 }
 
+static void
+ev_update_handler(struct ev_loop *loop, ev_io *w, int revents)
+{
+  unsigned char pbuf[4096];
+  const unsigned char *zero_pos;
+  ssize_t r;
+  struct zone *found = NULL, *cur;
+
+  r = read(w->fd, pbuf, sizeof (pbuf) - 1);
+
+  if (r == -1) {
+    if (errno == EINTR || errno == EAGAIN) {
+      return;
+    }
+    else {
+      dslog(LOG_ERR, 0, "failed to read update: %s", strerror (errno));
+      return;
+    }
+  }
+  else if (r == 0) {
+    dslog(LOG_ERR, 0, "failed to read update: zero size input");
+
+    return;
+  }
+
+  zero_pos = memchr(pbuf, 0, r);
+
+  if (zero_pos == NULL) {
+    dslog(LOG_ERR, 0, "failed to read update: no \\0 character found");
+
+    return;
+  }
+
+  for (cur = zonelist; cur != NULL; cur = cur->z_next) {
+    if (cur->z_name && strcmp (pbuf, cur->z_name) == 0) {
+      found = cur;
+      break;
+    }
+  }
+
+  if (found) {
+    dslog(LOG_INFO, 0, "got update event for zone %s", found->z_name);
+
+    /* Zero terminate update string */
+    pbuf[r] = '\0';
+    struct dsctx dsc;
+
+    for(struct dslist *dsl = found->z_dsl; dsl; dsl = dsl->dsl_next) {
+      if (dsl->dsl_ds->ds_type->dst_updatefn) {
+        dsl->dsl_ds->ds_type->dst_updatefn(dsl->dsl_ds, (char *)(zero_pos + 1), &dsc);
+        dslog(LOG_INFO, 0, "send update event for zone %s: %s",
+            found->z_name, zero_pos + 1);
+      }
+    }
+  }
+  else {
+    dslog(LOG_ERR, 0, "cannot find zone for update %s", pbuf);
+
+    return;
+  }
+}
+
 /*
  * Signal handlers
  */
@@ -1529,6 +1561,14 @@ int main(int argc, char **argv) {
     ev_io_start(loop, &io_evs[i]);
   }
 
+  static ev_io update_ev;
+
+  if (update_sock != -1) {
+    make_socket_nonblocking(update_sock);
+    ev_io_init(&update_ev, ev_update_handler, update_sock, EV_READ);
+    ev_io_start(loop, &update_ev);
+  }
+
   /* Also monitor zones for changes */
   if (recheck) {
     unsigned nds = 0;
@@ -1566,6 +1606,11 @@ int main(int argc, char **argv) {
   for(int i = 0; i < numsock; ++i) {
     close(sock[i]);
   }
+
+  if (update_sock != -1) {
+    close (update_sock);
+  }
+
   free(io_evs);
   free(stat_evs);
 

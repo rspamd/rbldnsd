@@ -168,7 +168,7 @@ int ds_combined_newset(struct dataset *ds, char *line, struct dsctx *dsc) {
     }
     else
       dns_dntol(dn, dn);
-    zone = newzone(&dsd->zlist, dn, dnlen, ds->ds_mp);
+    zone = newzone(&dsd->zlist, dn, dnlen, p, ds->ds_mp);
     dsl = mp_talloc(ds->ds_mp, struct dslist);
     if (!zone || !dsl) return -1;
     connectdataset(zone, dssub, dsl);

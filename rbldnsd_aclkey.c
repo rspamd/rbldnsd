@@ -188,7 +188,7 @@ ds_aclkey_line(struct dataset *ds, char *s, struct dsctx *dsc) {
     return 0;
   }
 
-  key.ldn = key_storage;
+  key.ldn = (const unsigned char *)key_storage;
   key.len = tail - s;
 
   if (key.len > DNS_MAXLABEL) {
@@ -295,5 +295,6 @@ int ds_aclkey_query(const struct dataset *ds, struct dnsqinfo *qi,
 const struct dstype dataset_aclkey_type = {
   "aclkey", DSTF_SPECIAL, sizeof(struct dsdata),
   ds_aclkey_reset, ds_aclkey_start, ds_aclkey_line, ds_aclkey_finish,
-  NULL, NULL, "Keyed Access Control List dataset"
+  NULL, NULL, NULL,
+  "Keyed Access Control List dataset"
 };
