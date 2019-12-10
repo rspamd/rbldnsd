@@ -353,6 +353,7 @@ static int newsocket_unix(const char *path)
     error(0, "invalid path: %s", path);
   }
 
+  un.sun_family = AF_UNIX;
   estrlcpy(un.sun_path, elts[0], sizeof (un.sun_path));
 #if defined(FREEBSD) || defined(__APPLE__)
   un.sun_len = SUN_LEN (&un);
