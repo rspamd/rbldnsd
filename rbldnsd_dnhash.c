@@ -484,9 +484,11 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
       dns_dntop(pkey->ldn + 1, name, sizeof(name));
     }
 
-    addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
+    if (e->rr) {
+      addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
 
-    return NSQUERY_FOUND;
+      return NSQUERY_FOUND;
+    }
   }
 
   /* Now check for wildcards */
@@ -517,9 +519,11 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
         dns_dntop(pkey->ldn + 1, name, sizeof(name));
       }
 
-      addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
+      if (e->rr) {
+        addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
 
-      return NSQUERY_FOUND;
+        return NSQUERY_FOUND;
+      }
     }
 
     /* remove next label at the end of rdn */
