@@ -415,7 +415,18 @@ static int newsocket_unix(const char *path)
   }
 
   if (bind(fd, (struct sockaddr *)&un, sizeof(un)) < 0) {
-    error(errno, "unable to bind to unix socket: %s", path);
+    if (errno == EADDRINUSE) {
+      /* Try to unlink */
+      dslog(LOG_INFO, 0, "unlinking stale socket %s", un.sun_path);
+      unlink(un.sun_path);
+
+      if (bind(fd, (struct sockaddr *)&un, sizeof(un)) < 0) {
+        error(errno, "unable to bind to unix socket: %s", path);
+      }
+    }
+    else {
+      error(errno, "unable to bind to unix socket: %s", path);
+    }
   }
 
   if (owner != (uid_t)-1 || group != (gid_t)-1) {
