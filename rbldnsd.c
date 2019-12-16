@@ -1424,6 +1424,10 @@ ev_update_handler(struct ev_loop *loop, ev_io *w, int revents)
         dslog(LOG_INFO, 0, "send update event for zone %s: %s",
             found->z_name, zero_pos + 1);
       }
+      else {
+        dslog(LOG_INFO, 0, "cannot send update event for zone %s: %s. no update function defined",
+              found->z_name, zero_pos + 1);
+      }
     }
   }
   else {

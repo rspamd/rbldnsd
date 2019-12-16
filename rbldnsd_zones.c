@@ -83,16 +83,17 @@ struct zone *newzone(struct zone **zonelist,
         if (!zone)
           return NULL;
 
+        memset(zone, 0, sizeof(*zone));
         zone->z_name = mp_dstrdup(mp, zname);
       } else {
         zone = tzalloc(struct zone);
         if (!zone)
           return NULL;
 
+        memset(zone, 0, sizeof(*zone));
         zone->z_name = estrdup(zname);
       }
 
-      memset(zone, 0, sizeof(*zone));
       if (lastzonep) { zone->z_next = *lastzonep; *lastzonep = zone; }
       else *zonep = zone;
       memcpy(zone->z_dn, dn, dnlen);
