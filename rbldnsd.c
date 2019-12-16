@@ -1375,11 +1375,17 @@ static void
 ev_update_handler(struct ev_loop *loop, ev_io *w, int revents)
 {
   unsigned char pbuf[4096];
+  const char ok_reply[] = "OK", fail_reply[] = "FAIL";
   const unsigned char *zero_pos;
   ssize_t r;
   struct zone *found = NULL, *cur;
+  union {
+    struct sockaddr_storage ss;
+    struct sockaddr sa;
+  } peer;
+  socklen_t slen = sizeof (peer);
 
-  r = read(w->fd, pbuf, sizeof (pbuf) - 1);
+  r = recvfrom(w->fd, pbuf, sizeof (pbuf) - 1, 0, &peer.sa, &slen);
 
   if (r == -1) {
     if (errno == EINTR || errno == EAGAIN) {
@@ -1400,6 +1406,7 @@ ev_update_handler(struct ev_loop *loop, ev_io *w, int revents)
 
   if (zero_pos == NULL) {
     dslog(LOG_ERR, 0, "failed to read update: no \\0 character found");
+    sendto(w->fd, fail_reply, sizeof (fail_reply) - 1, 0, &peer.sa, slen);
 
     return;
   }
@@ -1423,17 +1430,18 @@ ev_update_handler(struct ev_loop *loop, ev_io *w, int revents)
         dsl->dsl_ds->ds_type->dst_updatefn(dsl->dsl_ds, (char *)(zero_pos + 1), &dsc);
         dslog(LOG_INFO, 0, "send update event for zone %s: %s",
             found->z_name, zero_pos + 1);
+        sendto(w->fd, ok_reply, sizeof (ok_reply) - 1, 0, &peer.sa, slen);
       }
       else {
         dslog(LOG_INFO, 0, "cannot send update event for zone %s: %s. no update function defined",
               found->z_name, zero_pos + 1);
+        sendto(w->fd, fail_reply, sizeof (fail_reply) - 1, 0, &peer.sa, slen);
       }
     }
   }
   else {
     dslog(LOG_ERR, 0, "cannot find zone for update %s", pbuf);
-
-    return;
+    sendto(w->fd, fail_reply, sizeof (fail_reply) - 1, 0, &peer.sa, slen);
   }
 }
 
