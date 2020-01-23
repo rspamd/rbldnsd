@@ -32,8 +32,8 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
 {
   struct dsdata *dsd = ds->ds_dsd;
   ip4addr_t a;
-  btrie_oct_t addr_bytes[5];
   ip6oct_t ipv6_addr[IP6ADDR_FULL];
+  const char *orig;
   int bits;
   const char *rr;
   unsigned rrl;
@@ -57,10 +57,11 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
     not = 0;
   }
 
+  orig = s;
   /* First try ip4 */
-  if ((bits = ip4cidr(s, &a, &s)) < 0) {
+  if ((bits = ip4cidr(orig, &a, &s)) < 0) {
     /* Probably v6 address */
-    bits = ip6cidr(s, ipv6_addr, &s);
+    bits = ip6cidr(orig, ipv6_addr, &s);
 
     if (bits >= 0) {
       ipv6 = 1;
@@ -111,19 +112,22 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
     ret = btrie_add_prefix(dsd->btrie, ipv6_addr, bits, rr);
   }
   else {
-    ip4unpack(addr_bytes, a);
-    ret = btrie_add_prefix(dsd->btrie, addr_bytes, bits, rr);
+    memset(ipv6_addr, 0, 10);
+    ipv6_addr[10] = 0xffu;
+    ipv6_addr[11] = 0xffu;
+    ip4unpack(ipv6_addr + 12, a);
+    ret = btrie_add_prefix(dsd->btrie, ipv6_addr, 96 + bits, rr);
   }
 
   switch(ret) {
   case BTRIE_OKAY:
     return 1;
   case BTRIE_DUPLICATE_PREFIX:
-    if (ipv6) {
-      dswarn(dsc, "duplicated entry for %s/%d", ip4atos(a), bits);
+    if (!ipv6) {
+      dswarn(dsc, "duplicated entry for ipv4 %s/%d", ip4atos(a), bits);
     }
     else {
-      dswarn(dsc, "duplicated entry for %s/%d", ip6atos(ipv6_addr, IP6ADDR_FULL), bits);
+      dswarn(dsc, "duplicated entry for ipv6 %s/%d", ip6atos(ipv6_addr, IP6ADDR_FULL), bits);
     }
     return 1;
   case BTRIE_ALLOC_FAILED:
@@ -148,13 +152,17 @@ static int
 ds_ip4trie_query(const struct dataset *ds, const struct dnsqinfo *qi,
                  struct dnspacket *pkt) {
   const char *rr;
-  btrie_oct_t addr_bytes[4];
+  btrie_oct_t addr_bytes[IP6ADDR_FULL];
 
   if (qi->qi_ip4valid) {
     check_query_overwrites(qi);
 
-    ip4unpack(addr_bytes, qi->qi_ip4);
-    rr = btrie_lookup(ds->ds_dsd->btrie, addr_bytes, 32);
+    // Convert to ipv4mapped
+    memset(addr_bytes, 0, 10);
+    addr_bytes[10] = 0xffu;
+    addr_bytes[11] = 0xffu;
+    ip4unpack(addr_bytes + 12, qi->qi_ip4);
+    rr = btrie_lookup(ds->ds_dsd->btrie, addr_bytes, 8 * IP6ADDR_FULL);
   }
   else if (qi->qi_ip6valid) {
     check_query_overwrites(qi);
