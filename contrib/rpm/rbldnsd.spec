@@ -2,14 +2,15 @@
 
 Summary: Small fast daemon to serve DNSBLs
 Name: rbldnsd
-Version: 0.999
+Version: 1.0.0
 Release: 1
 License: GPL
 Group: System Environment/Daemons
 BuildRoot: %_tmppath/%name-%version
+BuildRequires: cmake, jemalloc-devel, libev-devel, zlib-devel
 Requires: /sbin/chkconfig, /sbin/nologin, shadow-utils
 
-Source: http://www.github.com/spamhaus/%name/%{name}-%version.tar.gz
+Source: http://www.github.com/rspamd/%name/%{name}-%version.tar.gz
 
 %define home /var/lib/rbldns
 
@@ -22,8 +23,8 @@ It may handle IP-based and name-based blocklists.
 %setup -q -n %name-%version
 
 %build
-CFLAGS="$RPM_OPT_FLAGS" CC="${CC:-%__cc}" ./configure
-make
+%{__cmake} -DENABLE_JEMALLOC=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=%{_prefix}
+%{__make} %{?jobs:-j%jobs}
 
 %install
 rm -rf $RPM_BUILD_ROOT
