@@ -221,5 +221,5 @@ int ds_acl_query(const struct dataset *ds, struct dnspacket *pkt) {
 const struct dstype dataset_acl_type = {
   "acl", DSTF_SPECIAL, sizeof(struct dsdata),
   ds_acl_reset, ds_acl_start, ds_acl_line, ds_acl_finish,
-  NULL, NULL, "Access Control List dataset"
+  NULL, NULL, NULL, "Access Control List dataset"
 };
