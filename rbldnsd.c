@@ -291,25 +291,6 @@ static int already_bound(const struct sockaddr *addr, socklen_t addrlen) {
   return 0;
 }
 
-#ifdef NO_IPv6
-static void newsocket(struct sockaddr_in *sin) {
-  int fd;
-  const char *host = ip4atos(ntohl(sin->sin_addr.s_addr));
-
-  if (already_bound((struct sockaddr *)sin, sizeof(*sin)))
-    return;
-  if (numsock >= MAXSOCK)
-    error(0, "too many listening sockets (%d max)", MAXSOCK);
-  fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (fd < 0)
-    error(errno, "unable to create socket");
-  if (bind(fd, (struct sockaddr *)sin, sizeof(*sin)) < 0)
-    error(errno, "unable to bind to %s/%d", host, ntohs(sin->sin_port));
-
-  dslog(LOG_INFO, 0, "listening on %s/%d", host, ntohs(sin->sin_port));
-  sock[numsock++] = fd;
-}
-#else
 static int newsocket(struct addrinfo *ai) {
   int fd;
   char host[NI_MAXHOST], serv[NI_MAXSERV];
@@ -333,7 +314,6 @@ static int newsocket(struct addrinfo *ai) {
 
   return fd;
 }
-#endif
 
 static int newsocket_unix(const char *path)
 {
@@ -571,7 +551,11 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
   uid_t uid = 0;
   gid_t gid = 0;
   int nodaemon = 0, quickstart = 0, dump = 0, nover = 0, forkon = 0, dry_run = 0;
+#ifdef NO_IPv6
+  int family = AF_INET;
+#else
   int family = AF_UNSPEC;
+#endif
   int cfd = -1;
   const struct zone *z;
 #ifndef NO_DSO
