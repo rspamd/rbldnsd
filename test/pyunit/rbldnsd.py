@@ -4,6 +4,8 @@
 """
 import errno
 from itertools import count
+import os
+import stat
 import subprocess
 from tempfile import NamedTemporaryFile, TemporaryFile
 import time
@@ -33,6 +35,7 @@ class ZoneFile(object):
         if lines is not None:
             self.writelines(lines)
         self._file.flush()
+        os.chmod(self._file.name, 0o644)
 
     def __del__(self):
         self._file.close()
