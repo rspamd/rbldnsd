@@ -429,7 +429,7 @@ static int newsocket_unix(const char *path)
 static int
 initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family) {
 
-  int i, x, cur_sock = 0;
+  int i, x = 0;
   char *host, *serv;
   const char *ba;
 
@@ -447,7 +447,7 @@ initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family
       int nfd = newsocket_unix(ba);
 
       if (nfd != -1) {
-        dest[cur_sock++] = nfd;
+        dest[numsock++] = nfd;
       }
     }
     else {
@@ -470,7 +470,7 @@ initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family
         int nfd = newsocket(ai);
         if (nfd != -1) {
           ++x;
-          dest[cur_sock++] = nfd;
+          dest[numsock++] = nfd;
         }
       }
       if (!x)
@@ -482,7 +482,7 @@ initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family
   endservent();
   endhostent();
 
-  for (i = 0; i < cur_sock; ++i) {
+  for (i = 0; i < numsock; ++i) {
     x = 65536;
     do {
       if (setsockopt(dest[i], SOL_SOCKET, SO_RCVBUF, (void *) &x, sizeof x) == 0) {
@@ -491,7 +491,7 @@ initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family
     } while ((x -= (x >> 5)) >= 1024);
   }
 
-  return cur_sock;
+  return numsock;
 }
 
 static struct {
@@ -754,7 +754,7 @@ break;
     if (!quickstart && !flog) logto |= LOGTO_STDOUT;
   }
 
-  numsock = initsockets(bindaddr, sock, nba, family);
+  initsockets(bindaddr, sock, nba, family);
 
   if (update_addr) {
     if (initsockets(&update_addr, &update_sock, 1, family) != 1) {
