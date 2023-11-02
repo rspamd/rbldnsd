@@ -15,10 +15,8 @@
             "make",
             "cd $DRONE_WORKSPACE",
             "mv ../build.rbldnsd/rbldnsd* .",
-            "python3 -mvenv ~/venv",
-            "bash -c \"source ~/venv/bin/activate && pip install py3dns robotframework\"",
-            "bash -c \"source ~/venv/bin/activate && robot test/functional/cases\"",
-            "bash -c \"source ~/venv/bin/activate && python3 test/pyunit/tests.py\""
+            "bash -c \"source /venv/bin/activate && robot test/functional/cases\"",
+            "bash -c \"source /venv/bin/activate && python3 test/pyunit/tests.py\""
          ],
          "image": "rspamd/rbldnsd:build",
          "name": "test"
@@ -51,10 +49,8 @@
             "make",
             "cd $DRONE_WORKSPACE",
             "mv ../build.rbldnsd/rbldnsd* .",
-            "python3 -mvenv ~/venv",
-            "bash -c \"source ~/venv/bin/activate && pip install py3dns robotframework\"",
-            "bash -c \"source ~/venv/bin/activate && robot test/functional/cases\"",
-            "bash -c \"source ~/venv/bin/activate && python3 test/pyunit/tests.py\""
+            "bash -c \"source /venv/bin/activate && robot test/functional/cases\"",
+            "bash -c \"source /venv/bin/activate && python3 test/pyunit/tests.py\""
          ],
          "image": "rspamd/rbldnsd:build",
          "name": "test"
@@ -72,7 +68,7 @@
 }
 ---
 {
-   "hmac": "7a880d84c8ea9b4aedba21269a1133affdb9ee4963a1c34f100a3034a1793670",
+   "hmac": "6ee32e221e78ba085962f88df05d4424e4cd960933ff437276e8e65aecfa7322",
    "kind": "signature"
 }
 ...
