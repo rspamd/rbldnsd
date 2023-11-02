@@ -5,11 +5,8 @@ name: default
 
 steps:
 - name: test
-  image: debian:bookworm
+  image: rspamd/rbldnsd:build
   commands:
-  # TODO: create a build image...
-  - apt-get update
-  - apt-get install -y cmake g++ gcc libjemalloc-dev libev-dev make pkg-config python3-pip python3-venv zlib1g-dev
   - mkdir ../build.rbldnsd
   - cd ../build.rbldnsd
   # TODO: fix IPv6 in CI
@@ -18,7 +15,6 @@ steps:
   - cd $DRONE_WORKSPACE
   - mv ../build.rbldnsd/rbldnsd* .
   - python3 -mvenv ~/venv
-  - useradd rbldns
   - bash -c "source ~/venv/bin/activate && pip install py3dns robotframework"
   - bash -c "source ~/venv/bin/activate && robot test/functional/cases"
   - bash -c "source ~/venv/bin/activate && python3 test/pyunit/tests.py"
@@ -29,6 +25,6 @@ trigger:
       - push
       - pull_request
 ---
-hmac: "ea322a06c11bdf2e1febb12a04b5ed04d6d7ea17c5c6f36dd9212f9e128f55a7"
+hmac: "045c15b7a89702903f14c09b30d35dee442f116ba1fbb82accf16bc80d1eaafa"
 kind: signature
 ...
