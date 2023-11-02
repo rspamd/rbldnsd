@@ -1,30 +1,78 @@
 ---
-kind: pipeline
-type: docker
-name: default
-
-steps:
-- name: test
-  image: rspamd/rbldnsd:build
-  commands:
-  - mkdir ../build.rbldnsd
-  - cd ../build.rbldnsd
-  # TODO: fix IPv6 in CI
-  - cmake -DNO_IPv6=ON $DRONE_WORKSPACE
-  - make
-  - cd $DRONE_WORKSPACE
-  - mv ../build.rbldnsd/rbldnsd* .
-  - python3 -mvenv ~/venv
-  - bash -c "source ~/venv/bin/activate && pip install py3dns robotframework"
-  - bash -c "source ~/venv/bin/activate && robot test/functional/cases"
-  - bash -c "source ~/venv/bin/activate && python3 test/pyunit/tests.py"
-
-trigger:
-  event:
-    include:
-      - push
-      - pull_request
+{
+   "kind": "pipeline",
+   "name": "default-amd64",
+   "platform": {
+      "arch": "amd64",
+      "os": "linux"
+   },
+   "steps": [
+      {
+         "commands": [
+            "mkdir ../build.rbldnsd",
+            "cd ../build.rbldnsd",
+            "cmake -DNO_IPv6=ON $DRONE_WORKSPACE",
+            "make",
+            "cd $DRONE_WORKSPACE",
+            "mv ../build.rbldnsd/rbldnsd* .",
+            "python3 -mvenv ~/venv",
+            "bash -c \"source ~/venv/bin/activate && pip install py3dns robotframework\"",
+            "bash -c \"source ~/venv/bin/activate && robot test/functional/cases\"",
+            "bash -c \"source ~/venv/bin/activate && python3 test/pyunit/tests.py\""
+         ],
+         "image": "rspamd/rbldnsd:build",
+         "name": "test"
+      }
+   ],
+   "trigger": {
+      "event": {
+         "include": [
+            "push",
+            "pull_request"
+         ]
+      }
+   },
+   "type": "docker"
+}
 ---
-hmac: "045c15b7a89702903f14c09b30d35dee442f116ba1fbb82accf16bc80d1eaafa"
-kind: signature
+{
+   "kind": "pipeline",
+   "name": "default-arm64",
+   "platform": {
+      "arch": "arm64",
+      "os": "linux"
+   },
+   "steps": [
+      {
+         "commands": [
+            "mkdir ../build.rbldnsd",
+            "cd ../build.rbldnsd",
+            "cmake -DNO_IPv6=ON $DRONE_WORKSPACE",
+            "make",
+            "cd $DRONE_WORKSPACE",
+            "mv ../build.rbldnsd/rbldnsd* .",
+            "python3 -mvenv ~/venv",
+            "bash -c \"source ~/venv/bin/activate && pip install py3dns robotframework\"",
+            "bash -c \"source ~/venv/bin/activate && robot test/functional/cases\"",
+            "bash -c \"source ~/venv/bin/activate && python3 test/pyunit/tests.py\""
+         ],
+         "image": "rspamd/rbldnsd:build",
+         "name": "test"
+      }
+   ],
+   "trigger": {
+      "event": {
+         "include": [
+            "push",
+            "pull_request"
+         ]
+      }
+   },
+   "type": "docker"
+}
+---
+{
+   "hmac": "7a880d84c8ea9b4aedba21269a1133affdb9ee4963a1c34f100a3034a1793670",
+   "kind": "signature"
+}
 ...
