@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+jobs:
+  test:
+    runs-on: [ "ubuntu-latest" ]
+    container:
+      image: ghcr.io/rspamd/rspamd-build-docker:rbldnsd-build
+      options: --user root
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@v4
+
+      - name: Run tests
+        run: |
+          mkdir build.rbldnsd
+          cd build.rbldnsd
+          cmake -DNO_IPv6=ON $GITHUB_WORKSPACE
+          make
+          cd $GITHUB_WORKSPACE
+          mv build.rbldnsd/rbldnsd* .
+          bash -c "source /venv/bin/activate && robot test/functional/cases"
+          bash -c "source /venv/bin/activate && python3 test/pyunit/tests.py"
