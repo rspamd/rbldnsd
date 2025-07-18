@@ -188,7 +188,7 @@ static void NORETURN usage(int exitcode) {
 "  (second -v makes rbldnsd to refuse such requests completely)\n"
 " -e - enable CIDR ranges where prefix is not on the range boundary\n"
 "  (by default ranges such 127.0.0.1/8 will be rejected)\n"
-" -c check - time interval to check for data file updates (1m)\n"
+" -c check - time interval to check for data file updates (1m), used as fallback when inotify not available in OS\n"
 " -p pidfile - write pid to specified file\n"
 " -n - do not become a daemon\n"
 " -f - fork a child process while reloading zones, to process requests\n"
