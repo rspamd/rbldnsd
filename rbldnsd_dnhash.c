@@ -40,6 +40,7 @@ struct key {
 
 struct entry {
   const char *rr;		/* A and TXT RRs */
+  const struct kv_params *params;
 };
 
 #if defined(__SSE4_2__) && defined(__x86_64) && defined(__GNUC__)
@@ -329,6 +330,7 @@ static int
 ds_dnhash_addent(khash_t(dnhash) *h,
                 const unsigned char *ldn,
                 const char *rr,
+                const struct kv_params *params,
                 unsigned dnlen) {
   struct entry *e;
   khiter_t k;
@@ -345,6 +347,7 @@ ds_dnhash_addent(khash_t(dnhash) *h,
 
   e = &kh_value(h, k);
   e->rr = rr;
+  e->params = params;
 
   return 1;
 }
@@ -354,6 +357,7 @@ ds_dnhash_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   struct dsdata *dsd = ds->ds_dsd;
   unsigned char dn[DNS_MAXDN];
   const char *rr;
+  const struct kv_params *params = NULL;
   unsigned char *ldn;
   unsigned dnlen, size;
   int not, iswild, isplain;
@@ -399,6 +403,11 @@ ds_dnhash_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   else {
     /* else parse rest */
     SKIPSPACE(s);
+
+    char *params_s = NULL;
+    rbldnsd_split_entry_params(s, &params_s);
+    params = rbldnsd_parse_kv_params(ds->ds_mp, dsc, params_s);
+
     if (!*s || ISCOMMENT(*s)) {
       /* use default if none given */
       rr = dsd->def_rr;
@@ -426,13 +435,13 @@ ds_dnhash_line(struct dataset *ds, char *s, struct dsctx *dsc) {
       dsd->w_maxlab = dnlab;
     }
 
-    if (!ds_dnhash_addent(dsd->wild[dnlab - 1], ldn, rr, dnlen - 1)) {
+    if (!ds_dnhash_addent(dsd->wild[dnlab - 1], ldn, rr, params, dnlen - 1)) {
       return 0;
     }
   }
 
   if (isplain) {
-    if (!ds_dnhash_addent(dsd->direct, ldn, rr, dnlen - 1)) {
+    if (!ds_dnhash_addent(dsd->direct, ldn, rr, params, dnlen - 1)) {
       return 0;
     }
   }
@@ -485,6 +494,16 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
     }
 
     if (e->rr) {
+      struct entry_action act;
+      act.allow = 1;
+      act.delay_ms = 0;
+      rbldnsd_apply_entry_params(pkt->p_peer, ds, qi, e->params, &act);
+      if (!act.allow) {
+        return 0;
+      }
+      if (act.delay_ms > pkt->p_delay_ms) {
+        pkt->p_delay_ms = act.delay_ms;
+      }
       addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
 
       return NSQUERY_FOUND;
@@ -520,6 +539,16 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
       }
 
       if (e->rr) {
+        struct entry_action act;
+        act.allow = 1;
+        act.delay_ms = 0;
+        rbldnsd_apply_entry_params(pkt->p_peer, ds, qi, e->params, &act);
+        if (!act.allow) {
+          return 0;
+        }
+        if (act.delay_ms > pkt->p_delay_ms) {
+          pkt->p_delay_ms = act.delay_ms;
+        }
         addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
 
         return NSQUERY_FOUND;

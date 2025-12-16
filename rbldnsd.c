@@ -1232,6 +1232,149 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 #define MSGVEC_LEN 1
 #endif
 
+struct delayed_reply {
+  ev_tstamp at;
+  int fd;
+  struct sockaddr_storage peer;
+  socklen_t peerlen;
+  unsigned char *buf;
+  size_t len;
+};
+
+static struct delayed_reply *delayed_heap;
+static unsigned delayed_heap_len;
+static unsigned delayed_heap_cap;
+static size_t delayed_bytes;
+static ev_timer delayed_timer;
+static struct ev_loop *delayed_loop;
+
+#define DELAYED_MAX_ITEMS 8192
+#define DELAYED_MAX_BYTES (32u * 1024u * 1024u)
+
+static inline void delayed_swap(unsigned a, unsigned b) {
+  struct delayed_reply tmp = delayed_heap[a];
+  delayed_heap[a] = delayed_heap[b];
+  delayed_heap[b] = tmp;
+}
+
+static void delayed_sift_up(unsigned idx) {
+  while (idx > 0) {
+    unsigned parent = (idx - 1) / 2;
+    if (delayed_heap[parent].at <= delayed_heap[idx].at) {
+      break;
+    }
+    delayed_swap(parent, idx);
+    idx = parent;
+  }
+}
+
+static void delayed_sift_down(unsigned idx) {
+  for (;;) {
+    unsigned left = idx * 2 + 1;
+    unsigned right = left + 1;
+    unsigned smallest = idx;
+    if (left < delayed_heap_len && delayed_heap[left].at < delayed_heap[smallest].at)
+      smallest = left;
+    if (right < delayed_heap_len && delayed_heap[right].at < delayed_heap[smallest].at)
+      smallest = right;
+    if (smallest == idx)
+      break;
+    delayed_swap(idx, smallest);
+    idx = smallest;
+  }
+}
+
+static void delayed_schedule_timer(struct ev_loop *loop) {
+  if (delayed_heap_len == 0) {
+    if (ev_is_active(&delayed_timer)) {
+      ev_timer_stop(loop, &delayed_timer);
+    }
+    return;
+  }
+
+  ev_tstamp now = ev_now(loop);
+  ev_tstamp after = delayed_heap[0].at > now ? (delayed_heap[0].at - now) : 0.0;
+  ev_timer_set(&delayed_timer, after, 0.0);
+  if (!ev_is_active(&delayed_timer)) {
+    ev_timer_start(loop, &delayed_timer);
+  }
+  else {
+    ev_timer_again(loop, &delayed_timer);
+  }
+}
+
+static void delayed_timer_cb(struct ev_loop *loop, ev_timer *w, int revents) {
+  (void)w;
+  (void)revents;
+
+  ev_tstamp now = ev_now(loop);
+  while (delayed_heap_len > 0 && delayed_heap[0].at <= now) {
+    struct delayed_reply r = delayed_heap[0];
+    delayed_heap[0] = delayed_heap[--delayed_heap_len];
+    if (delayed_heap_len > 0) {
+      delayed_sift_down(0);
+    }
+
+    if (r.buf && r.len) {
+      (void)sendto(r.fd, r.buf, r.len, 0, (struct sockaddr *)&r.peer, r.peerlen);
+      delayed_bytes -= r.len;
+      free(r.buf);
+    }
+  }
+
+  delayed_schedule_timer(loop);
+}
+
+static void delayed_init(struct ev_loop *loop) {
+  delayed_loop = loop;
+  ev_timer_init(&delayed_timer, delayed_timer_cb, 0.0, 0.0);
+}
+
+static int delayed_push(int fd, const struct sockaddr *peer, socklen_t peerlen,
+                        const unsigned char *buf, size_t len, unsigned delay_ms) {
+  if (delay_ms == 0 || !buf || len == 0) {
+    return 0;
+  }
+  if (delayed_heap_len >= DELAYED_MAX_ITEMS || delayed_bytes + len > DELAYED_MAX_BYTES) {
+    return 0;
+  }
+
+  if (delayed_heap_len == delayed_heap_cap) {
+    unsigned new_cap = delayed_heap_cap ? delayed_heap_cap * 2 : 128;
+    if (new_cap > DELAYED_MAX_ITEMS) {
+      new_cap = DELAYED_MAX_ITEMS;
+    }
+    struct delayed_reply *n = realloc(delayed_heap, sizeof(*n) * new_cap);
+    if (!n) {
+      return 0;
+    }
+    delayed_heap = n;
+    delayed_heap_cap = new_cap;
+  }
+
+  unsigned char *copy = malloc(len);
+  if (!copy) {
+    return 0;
+  }
+  memcpy(copy, buf, len);
+
+  struct delayed_reply *r = &delayed_heap[delayed_heap_len];
+  memset(r, 0, sizeof(*r));
+  r->fd = fd;
+  r->peerlen = peerlen;
+  memcpy(&r->peer, peer, peerlen);
+  r->buf = copy;
+  r->len = len;
+  r->at = ev_now(delayed_loop) + ((ev_tstamp)delay_ms / 1000.0);
+
+  delayed_bytes += len;
+  delayed_sift_up(delayed_heap_len);
+  delayed_heap_len++;
+
+  delayed_schedule_timer(delayed_loop);
+  return 1;
+}
+
 static int request(int fd) {
   int q;
 #ifndef NO_IPv6
@@ -1280,6 +1423,7 @@ static int request(int fd) {
 #endif
     pkt[i].p_peerlen = MSG_FIELD(msg[i], msg_namelen);
     pkt[i].p_peer = MSG_FIELD(msg[i], msg_name);
+    pkt[i].p_delay_ms = 0;
     replies_lengths[i] = replypacket(&pkt[i], q, zonelist, &qi);
 
     if (flog) {
@@ -1289,6 +1433,15 @@ static int request(int fd) {
 
   int cur_rep = 0;
   for (int i = 0; i < lim; i ++) {
+    if (replies_lengths[i] > 0 && pkt[i].p_delay_ms > 0) {
+      if (delayed_push(fd, (const struct sockaddr *)&peer_sa[i],
+                       MSG_FIELD(msg[i], msg_namelen),
+                       pkt[i].p_buf, (size_t)replies_lengths[i],
+                       pkt[i].p_delay_ms)) {
+        replies_lengths[i] = 0;
+      }
+    }
+
     if (replies_lengths[i] > 0) {
       iovs[cur_rep].iov_base = pkt[i].p_buf;
       iovs[cur_rep].iov_len = replies_lengths[i];
@@ -1547,6 +1700,7 @@ int main(int argc, char **argv) {
   }
 
   init(argc, argv, loop);
+  delayed_init(loop);
   setup_signals(loop);
   reopenlog();
   can_reload = 1;
