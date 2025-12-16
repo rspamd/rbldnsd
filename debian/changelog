@@ -1,3 +1,18 @@
+rbldnsd (1.0.0-2) unstable; urgency=medium
+
+  * Modernize Debian packaging for systemd
+  * Switch from SysV init to systemd service unit
+  * Update to CMake build system with modern debhelper
+  * Update Build-Depends for CMake and jemalloc
+  * Update debian/rules to use dh sequencer with CMake
+  * Update debian/compat to level 13
+  * Simplify postinst script (systemd handles service management)
+  * Create rbldnsd.service with minimal systemd configuration
+  * Update rbldnsd.default for systemd EnvironmentFile compatibility
+  * Remove debug package (rbldnsd-dbg)
+
+ -- rbldnsd maintainers <dru@fatalbanana.com>  Mon, 16 Dec 2024 16:24:42 +0000
+
 rbldnsd (1.0.0-1) unstable; urgency=medium
 
   * New upstream snapshot.
