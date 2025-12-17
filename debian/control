@@ -1,32 +1,26 @@
 Source: rbldnsd
 Section: net
 Priority: optional
-Maintainer: Vsevolod Stakhov <vsevolod@highsecure.ru>
-Build-Depends:
- debhelper (>= 9),
- zlib1g-dev,
- cmake,
- libjemalloc-dev,
- libev-dev,
- debhelper (>= 9),
- dpkg-dev (>= 1.16.1~)
-Standards-Version: 3.9.8
-Homepage: https://rspamd.com
-Vcs-Git: git://github.com/rspamd/rbldnsd.git
+Maintainer: rbldnsd maintainers <vsevolod@rspamd.com>
+Build-Depends: debhelper (>= 13),
+               cmake (>= 3.9),
+               gawk,
+               gcc,
+               libjemalloc-dev,
+               libev-dev,
+               zlib1g-dev
+Standards-Version: 4.6.0
+Vcs-Git: https://github.com/rspamd/rbldnsd.git
 Vcs-Browser: https://github.com/rspamd/rbldnsd
+Homepage: https://github.com/rspamd/rbldnsd
 
 Package: rbldnsd
 Architecture: any
-Multi-Arch: foreign
-Depends: ${shlibs:Depends}, ${misc:Depends}, lsb-base, adduser
+Depends: ${shlibs:Depends}, adduser
 Description: small nameserver daemon designed for DNSBLs
- rbldnsd is a small authoritative-only DNS nameserver
+ Rbldnsd is a small authoritative-only DNS nameserver
  designed to serve DNS-based blocklists (DNSBLs).
  It may handle IP-based and name-based blocklists.
-
-Package: rbldnsd-dbg
-Architecture: any
-Section: debug
-Depends: rbldnsd (= ${binary:Version}), ${misc:Depends}, ${shlibs:Depends}
-Description: debugging symbols for rbldnsd
- This package contains the debugging symbols for rbldnsd.
+ .
+ This is a high-performance fork with modern build system,
+ LTO support, and optimized datagram processing.
