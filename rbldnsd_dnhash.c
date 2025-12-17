@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <limits.h>
 #include <syslog.h>
 
 #include "khash.h"
@@ -383,9 +384,26 @@ dnhash_bloom_create(struct dataset *ds, size_t nbits)
     return NULL;
   }
 
-  nbits = dnhash_pow2_round_up(nbits);
+  size_t rounded = dnhash_pow2_round_up(nbits);
+  if (rounded < nbits) {
+    /* overflow during rounding */
+    return NULL;
+  }
+  nbits = rounded;
+
+  /* Keep mask/index math in uint32_t and protect mp_alloc(unsigned) */
+  if (nbits > (1ULL << 31) || nbits > (size_t)DNHASH_BLOOM_MAX_BYTES * 8) {
+    return NULL;
+  }
+
   size_t nwords = (nbits + 63) / 64;
+  if (nwords > (SIZE_MAX - sizeof(struct dnhash_bloom)) / sizeof(uint64_t)) {
+    return NULL;
+  }
   size_t alloc_size = sizeof(struct dnhash_bloom) + nwords * sizeof(uint64_t);
+  if (alloc_size > UINT_MAX) {
+    return NULL;
+  }
 
   struct dnhash_bloom *b = mp_alloc(ds->ds_mp, (unsigned)alloc_size, 1);
   if (!b) {
@@ -478,7 +496,7 @@ ds_dnhash_addent(khash_t(dnhash) *h,
   e = &kh_value(h, k);
   e->rr = rr;
 
-  if (bloom) {
+  if (bloom && ret > 0) {
     dnhash_bloom_add(bloom, ldn, dnlen);
   }
 
