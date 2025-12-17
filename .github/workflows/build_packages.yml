@@ -1,0 +1,148 @@
+name: Build packages
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        required: true
+        type: string
+        description: 'The target OS/distro name (e.g., ubuntu-jammy, centos-9)'
+      platform:
+        required: true
+        type: string
+        description: 'The target platform (X64 or ARM64)'
+      version:
+        required: true
+        type: string
+        description: 'Version in format vX.Y.Z+N'
+      experimental:
+        required: false
+        type: boolean
+        description: 'If true, build from specified branch but use provided version number'
+      branch:
+        required: false
+        type: string
+        description: 'Branch to checkout (only used for experimental builds)'
+      repo:
+        required: false
+        type: string
+        description: 'Repository to build from (owner/repo format)'
+
+    outputs:
+      revision:
+        description: "Commit hash of rbldnsd"
+        value: ${{ jobs.build.outputs.revision }}
+
+jobs:
+  build:
+    name: 'build (${{ inputs.name }}/${{ inputs.platform }})'
+    runs-on: ${{ inputs.platform == 'ARM64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+
+    outputs:
+      revision: ${{ steps.save_commit.outputs.revision }}
+
+    steps:
+      - name: Set version information for release
+        run: |
+          export RBLDNSD_VERSION=`echo ${{ inputs.version }} | sed s/^v// | sed 's/\+.*//'`
+          export PATCH_VERSION=`echo ${{ inputs.version }} | cut -d'+' -f2`
+
+          echo "PATCH_VERSION=${PATCH_VERSION}" >> "$GITHUB_ENV"
+          echo "RBLDNSD_VERSION=${RBLDNSD_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Check out rbldnsd
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          path: rbldnsd
+          ref: ${{ inputs.experimental && inputs.branch || env.RBLDNSD_VERSION }}
+
+      - name: Save commit hash
+        id: save_commit
+        run: |
+          cd rbldnsd
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          export GIT_VERSION=$(git rev-parse --short HEAD)
+          echo "GIT_VERSION=${GIT_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set OS-specific variables
+        run: |
+          if [[ "${{ inputs.name }}" == ubuntu-* || "${{ inputs.name }}" == debian-* ]]; then
+            echo "PKG_TYPE=deb" >> "$GITHUB_ENV"
+            export CODENAME=$(echo "${{ inputs.name }}" | cut -d'-' -f2)
+            export PACKAGE_VERSION="${PATCH_VERSION}~${GIT_VERSION}~${CODENAME}"
+          elif [[ "${{ inputs.name }}" == centos-* ]] ; then
+            echo "PKG_TYPE=rpm" >> "$GITHUB_ENV"
+            export PACKAGE_VERSION="${PATCH_VERSION}"
+          else
+            echo "Bad inputs.name: ${{ inputs.name }}"
+            exit 1
+          fi
+
+          echo PACKAGE_VERSION=${PACKAGE_VERSION} >> "$GITHUB_ENV"
+
+      - name: Check out packpack
+        uses: actions/checkout@v4
+        with:
+          repository: packpack/packpack
+          path: packpack
+
+      - name: Build packages
+        run: |
+          export ASAN=0
+          export BUILDDIR=${{ github.workspace }}/rbldnsd/build
+          export DOCKER_IMAGE=${{ inputs.name }}
+          export DOCKER_REPO=ghcr.io/rspamd/rspamd-build-docker
+          export PRESERVE_ENVVARS=ASAN
+          export RELEASE=$PACKAGE_VERSION
+          export VERSION=$RBLDNSD_VERSION
+
+          mkdir -p "$BUILDDIR"
+          echo "BUILDDIR=${BUILDDIR}" >> "$GITHUB_ENV"
+
+          if [[ "${{ env.PKG_TYPE }}" == "deb" ]]; then
+            export DEBIAN=1
+            export RPM=0
+          elif [[ "${{ env.PKG_TYPE }}" == "rpm" ]]; then
+            export DEBIAN=0
+            export RPM=1
+          else
+            echo "Bad env.PKG_TYPE: ${{ env.PKG_TYPE }}"
+            exit 1
+          fi
+
+          cd rbldnsd
+          ../packpack/packpack
+          if [ $RPM -eq 1 ]; then
+            export ASAN=1
+            ../packpack/packpack
+          fi
+
+      - name: Collect outputs by distro name
+        run: |
+          set -euo pipefail
+          mkdir -p out/${{ inputs.name }}
+          # Primary outputs from packpack live in rbldnsd/build
+          found_any=0
+          if [ -d rbldnsd/build ]; then
+            # Copy both files and nested directories (e.g., debs split by arch)
+            rsync -a rbldnsd/build/ out/${{ inputs.name }}/ && found_any=1 || true
+          fi
+          # Also copy RPM artifacts produced to repo location (for RPM workflows)
+          if compgen -G "*.rpm" > /dev/null; then
+            cp -f *.rpm out/${{ inputs.name }}/ && found_any=1 || true
+          fi
+          # Ensure we fail early if nothing was produced
+          if [ "$found_any" -eq 0 ]; then
+            echo "No build artifacts found for ${{ inputs.name }}" >&2
+            exit 1
+          fi
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ inputs.name }}-${{ inputs.platform }}
+          path: out
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0

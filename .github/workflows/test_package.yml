@@ -1,0 +1,126 @@
+name: Test package (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        required: true
+        type: string
+        description: 'Untampered docker image to use for testing'
+      name:
+        required: true
+        type: string
+        description: 'The target OS/distro name to test (e.g., ubuntu-jammy, centos-9)'
+      platform:
+        required: true
+        type: string
+        description: 'X64 or ARM64'
+      revision:
+        required: true
+        type: string
+        description: 'The git commit hash of the rbldnsd repository to check out.'
+
+jobs:
+  test:
+    name: 'test (${{ inputs.name }}/${{ inputs.platform }})'
+    runs-on: ${{ inputs.platform == 'ARM64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    container:
+      image: ${{ inputs.image }}
+
+    steps:
+      - name: Download package(s)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: packages-${{ inputs.name }}-${{ inputs.platform }}
+          path: out
+          merge-multiple: true
+
+      - name: Perform OS-specific steps and install package
+        shell: bash
+        run: |
+          # Install rbldnsd
+          if [[ "${{ inputs.name }}" == ubuntu-* || "${{ inputs.name }}" == debian-* ]]; then
+            echo "Installing DEB packages..."
+            apt-get update
+            shopt -s nullglob
+            if [[ "${{ inputs.platform }}" == "ARM64" ]]; then arch=arm64; else arch=amd64; fi
+            debs=( out/${{ inputs.name }}/rbldnsd_*_${arch}.deb out/${{ inputs.name }}/rbldnsd-dbg_*_${arch}.deb )
+            if (( ${#debs[@]} == 0 )); then
+              echo "No DEB files found for arch $arch under out/${{ inputs.name }}" >&2
+              exit 1
+            fi
+            dpkg -i "${debs[@]}" || apt-get install -f -y
+          elif [[ "${{ inputs.name }}" == centos-* ]] ; then
+            echo "Setting up repositories..."
+            dnf -qy install epel-release
+            crb enable
+          else
+            echo "Bad inputs.name: ${{ inputs.name }}"
+            exit 1
+          fi
+
+          if [[ "${{ inputs.name }}" == centos-* ]]; then
+            echo "Installing RPM packages..."
+            # Avoid installing source RPMs; select only current arch artifacts
+            shopt -s nullglob
+            arch=$(rpm -E %_arch)
+            rpms=(
+              out/${{ inputs.name }}/rbldnsd-[0-9]*.${arch}.rpm
+              out/${{ inputs.name }}/rbldnsd-debuginfo-[0-9]*.${arch}.rpm
+            )
+            if (( ${#rpms[@]} == 0 )); then
+              echo "No RPM files found for arch $arch under out/${{ inputs.name }}" >&2
+              exit 1
+            fi
+            dnf install -y "${rpms[@]}"
+          fi
+
+          # Install test dependencies
+          if [[ "${{ inputs.name }}" == ubuntu-* || "${{ inputs.name }}" == debian-* ]]; then
+            apt-get install -y python3 python3-pip python3-venv python3-dns
+          elif [[ "${{ inputs.name }}" == centos-* ]]; then
+            dnf install -y python3 python3-pip python3-py3dns
+          fi
+
+      - name: Check out rbldnsd source
+        uses: actions/checkout@v4
+        with:
+          repository: rspamd/rbldnsd
+          path: rbldnsd
+          ref: "${{ inputs.revision }}"
+
+      - name: Set up test environment
+        shell: bash
+        run: |
+          python3 -mvenv $GITHUB_WORKSPACE/venv --system-site-packages
+          bash -c "source $GITHUB_WORKSPACE/venv/bin/activate && pip3 install robotframework"
+
+
+      - name: Run tests
+        id: run_tests
+        continue-on-error: true
+        run: |
+          # Set RBLDNSD_TOPDIR to find the installed rbldnsd binary (/usr/sbin/rbldnsd from package)
+          export RBLDNSD_TOPDIR=/usr/sbin
+          bash -c "source $GITHUB_WORKSPACE/venv/bin/activate && robot --removekeywords wuks --exclude isbroken $GITHUB_WORKSPACE/rbldnsd/test/functional/cases"
+
+      - name: Save workspace directory on test failure
+        if: steps.run_tests.outcome == 'failure'
+        run: echo "CONTAINER_WORKSPACE=${GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
+
+      - name: Upload robot logs
+        if: steps.run_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: robotlog-${{ inputs.platform }}-${{ inputs.name }}
+          # *.xml, *.html, *.log
+          path: |
+            ${{ env.CONTAINER_WORKSPACE }}/*.*ml
+            ${{ env.CONTAINER_WORKSPACE }}/*.log
+          retention-days: 1
+
+      - name: Maybe die (Fail the job)
+        if: steps.run_tests.outcome == 'failure'
+        run: |
+          echo "Tests failed. Review the uploaded artifacts."
+          exit 1

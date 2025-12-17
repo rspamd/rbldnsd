@@ -1,0 +1,52 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version in format vX.Y.Z+N'
+        required: true
+      experimental:
+        description: 'If true, build from specified branch but use provided version number'
+        required: false
+        type: boolean
+      branch:
+        description: 'Branch to build from (only used for experimental builds)'
+        required: false
+        type: string
+        default: 'master'
+      repo:
+        description: 'Repository to build from (owner/repo format)'
+        required: false
+        type: string
+        default: 'rspamd/rbldnsd'
+      distributions:
+        description: 'Distributions to build - comma-separated list (e.g., centos-9,debian-trixie). Leave empty to build all.'
+        required: false
+        type: string
+      architectures:
+        description: 'Architectures to build - comma-separated list (e.g., X64,ARM64). Leave empty to build all.'
+        required: false
+        type: string
+
+jobs:
+  validate_inputs:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check version format
+        run: |
+          if [[ ! "${{ github.event.inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+$ ]]; then
+            echo "Version must match vX.Y.Z+N" >&2
+            exit 1
+          fi
+
+  build_test:
+    needs: validate_inputs
+    uses: ./.github/workflows/build_test.yml
+    with:
+      version: ${{ github.event.inputs.version }}
+      experimental: ${{ github.event.inputs.experimental == 'true' }}
+      branch: ${{ github.event.inputs.branch }}
+      repo: ${{ github.event.inputs.repo }}
+      distributions: ${{ github.event.inputs.distributions }}
+      architectures: ${{ github.event.inputs.architectures }}
