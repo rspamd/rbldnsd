@@ -9,8 +9,8 @@
 #   zone1.com:ip4set:zone1 \
 #   zone2.com:ip4set:zone2"
 
-# Default: empty (daemon will start with no zones loaded initially)
-RBLDNSD_OPTIONS=""
+# Default: -n (daemon needs zones to run)
+RBLDNSD_OPTIONS="-n"
 
 # You can also set logging facility with -F option:
 # RBLDNSD_OPTIONS="-r/var/lib/rbldns -F local0 -b127.2 example.com:ip4set:example"
