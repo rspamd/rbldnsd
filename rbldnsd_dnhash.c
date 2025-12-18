@@ -790,8 +790,6 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
       }
     }
 
-    }
-
     /* remove next label at the end of rdn */
     qlen0 -= *dn + 1;
     dn += *dn + 1;
