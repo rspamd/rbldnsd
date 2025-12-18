@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdbool.h> /* for bool */
 #include <stdint.h> /* for bool */
+#include <time.h>
 #include "config.h"
 #include "ip4addr.h"
 #include "ip6addr.h"
@@ -91,6 +92,8 @@ int rbldnsd_apply_entry_params(const struct sockaddr *requestor,
                                const struct dnsqinfo *qinfo,
                                const struct kv_params *params,
                                struct entry_action *action);
+
+time_t rbldnsd_cached_time(void);
 
 char *rbldnsd_split_entry_params(char *s, char **params_out);
 const struct kv_params *rbldnsd_parse_kv_params(struct mempool *mp,
