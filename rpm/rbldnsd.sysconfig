@@ -1,5 +1,5 @@
 # Configuration file for rbldnsd service
-# This file sets the environment variables and command-line arguments passed to rbldnsd
+# This file sets the command-line arguments passed to rbldnsd
 
 # Basic example with a single instance:
 # RBLDNSD_OPTIONS="-r/var/lib/rbldns -b127.2 example.com:ip4set:example"

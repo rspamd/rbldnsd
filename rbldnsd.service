@@ -1,0 +1,20 @@
+[Unit]
+Description=rbldnsd - DNS blocklist daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rbldns
+Group=rbldns
+ExecStart=/usr/sbin/rbldnsd $RBLDNSD_OPTIONS
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+EnvironmentFile=-/etc/sysconfig/rbldnsd
+EnvironmentFile=-/etc/default/rbldnsd
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_SYS_CHROOT
+
+[Install]
+WantedBy=multi-user.target

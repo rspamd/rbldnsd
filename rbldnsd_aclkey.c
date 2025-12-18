@@ -137,7 +137,7 @@ static int
 ds_aclkey_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   struct dsdata *dsd = ds->ds_dsd;
   khiter_t k;
-  char *tail, *key_storage;
+  char *tail, *key_end, *key_storage;
   const char *rr;
   int rrl;
   struct acl_val *nval;
@@ -162,7 +162,8 @@ ds_aclkey_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   rr = dsd->def_rr;
 
   /* Parse key name */
-  tail = s + strcspn(s, ":= ");
+  key_end = s + strcspn(s, ":= ");
+  tail = key_end;
 
   if (*tail) {
     SKIPSPACE(tail);
@@ -176,20 +177,21 @@ ds_aclkey_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   }
   else {
     tail = s + strlen(s);
+    key_end = tail;
   }
 
-  key_storage = mp_alloc(ds->ds_mp, tail - s + 1, 0);
+  key_storage = mp_alloc(ds->ds_mp, key_end - s + 1, 0);
   if (key_storage) {
-    memcpy(key_storage, s, tail - s);
-    key_storage[tail - s] = '\0';
+    memcpy(key_storage, s, key_end - s);
+    key_storage[key_end - s] = '\0';
   }
   else {
-    dslog(LOG_ERR, dsc, "failed to allocate %d bytes", (int)(tail - s + 1));
+    dslog(LOG_ERR, dsc, "failed to allocate %d bytes", (int)(key_end - s + 1));
     return 0;
   }
 
   key.ldn = (const unsigned char *)key_storage;
-  key.len = tail - s;
+  key.len = key_end - s;
 
   if (key.len > DNS_MAXLABEL) {
     dslog(LOG_ERR, dsc, "cannot insert value %s to acl keys: too long (> %d chars)",
