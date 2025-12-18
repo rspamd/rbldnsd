@@ -37,6 +37,7 @@ struct dataset;
 struct dsdata;
 struct dhdata;
 struct dsctx;
+struct dnsqinfo;
 struct sockaddr;
 struct ev_loop;
 struct ev_stat;
@@ -50,8 +51,51 @@ struct dnspacket {		/* private structure */
   const struct dataset *p_substds;
   const struct sockaddr *p_peer;/* address of the requesting client */
   unsigned p_peerlen;
+  unsigned p_delay_ms;          /* optional delay requested by entry params */
 };
 
+struct kv_pair {
+  const char *k;
+  const char *v;
+};
+
+struct kv_params {
+  unsigned n;
+  char *storage;
+  struct kv_pair kv[];
+};
+
+struct entry_meta {
+  const char *rr;
+  const struct kv_params *params;
+};
+
+struct entry_action {
+  int allow;
+  unsigned delay_ms;
+  unsigned flags;
+};
+
+#define ENTRY_ACTION_STOP   0x01u
+#define ENTRY_ACTION_NODELAY 0x02u
+
+typedef int (*entry_params_handler_t)(const struct sockaddr *requestor,
+                                      const struct dataset *ds,
+                                      const struct dnsqinfo *qinfo,
+                                      const struct kv_params *params,
+                                      struct entry_action *action);
+
+int rbldnsd_register_entry_params_handler(entry_params_handler_t cb);
+int rbldnsd_apply_entry_params(const struct sockaddr *requestor,
+                               const struct dataset *ds,
+                               const struct dnsqinfo *qinfo,
+                               const struct kv_params *params,
+                               struct entry_action *action);
+
+char *rbldnsd_split_entry_params(char *s, char **params_out);
+const struct kv_params *rbldnsd_parse_kv_params(struct mempool *mp,
+                                                struct dsctx *dsc,
+                                                const char *s);
 struct dnsquery {	/* q */
   unsigned q_type;			/* query RR type */
   unsigned q_class;			/* query class */

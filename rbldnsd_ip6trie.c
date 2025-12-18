@@ -39,6 +39,8 @@ ds_ip6trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
   unsigned rrl;
   int bits, excl, non_zero_host;
   ip6oct_t addr[IP6ADDR_FULL];
+  char *params_s = NULL;
+  const struct kv_params *params = NULL;
 
   /* "::" can not be a valid start to a default RR setting ("invalid A
    * RR") but it can be a valid beginning to an ip6 address
@@ -72,14 +74,25 @@ ds_ip6trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
   SKIPSPACE(s);
   if (excl)
     rr = NULL;
-  else if (!*s || ISCOMMENT(*s))
-    rr = dsd->def_rr;
-  else if (!(rrl = parse_a_txt(s, &rr, dsd->def_rr, dsc)))
-    return 1;
-  else if (!(rr = mp_dmemdup(ds->ds_mp, rr, rrl)))
-    return 0;
+  else {
+    rbldnsd_split_entry_params(s, &params_s);
+    params = rbldnsd_parse_kv_params(ds->ds_mp, dsc, params_s);
+    if (!*s || ISCOMMENT(*s))
+      rr = dsd->def_rr;
+    else if (!(rrl = parse_a_txt(s, &rr, dsd->def_rr, dsc)))
+      return 1;
+    else if (!(rr = mp_dmemdup(ds->ds_mp, rr, rrl)))
+      return 0;
+  }
 
-  switch(btrie_add_prefix(dsd->btrie, addr, bits, rr)) {
+  struct entry_meta *meta = mp_alloc(ds->ds_mp, sizeof(*meta), 1);
+  if (!meta) {
+    return 0;
+  }
+  meta->rr = rr;
+  meta->params = params;
+
+  switch(btrie_add_prefix(dsd->btrie, addr, bits, meta)) {
   case BTRIE_OKAY:
     return 1;
   case BTRIE_DUPLICATE_PREFIX:
@@ -103,15 +116,30 @@ ds_ip6trie_query(const struct dataset *ds, const struct dnsqinfo *qi,
                  struct dnspacket *pkt)
 {
   const char *subst = NULL;
+  const struct entry_meta *meta;
   const char *rr;
 
   if (!qi->qi_ip6valid) return 0;
   check_query_overwrites(qi);
 
-  rr = btrie_lookup(ds->ds_dsd->btrie, qi->qi_ip6, 8 * IP6ADDR_FULL);
+  meta = btrie_lookup(ds->ds_dsd->btrie, qi->qi_ip6, 8 * IP6ADDR_FULL);
 
-  if (!rr)
+  if (!meta || !meta->rr)
     return 0;
+
+  struct entry_action act;
+  act.allow = 1;
+  act.delay_ms = 0;
+  act.flags = 0;
+  rbldnsd_apply_entry_params(pkt->p_peer, ds, qi, meta->params, &act);
+  if (!act.allow) {
+    return 0;
+  }
+  if (act.delay_ms > pkt->p_delay_ms) {
+    pkt->p_delay_ms = act.delay_ms;
+  }
+
+  rr = meta->rr;
 
   if (qi->qi_tflag & NSQUERY_TXT)
     subst = ip6atos(qi->qi_ip6, IP6ADDR_FULL);
@@ -154,6 +182,8 @@ dump_cb(const btrie_oct_t *prefix, unsigned len, const void *data, int post,
   struct dump_context *ctx = user_data;
   unsigned nb = (len + 7) / 8;
   ip6oct_t addr[IP6ADDR_FULL];
+  const struct entry_meta *meta;
+  const char *rr;
 
   if (nb > IP6ADDR_FULL)
     return;                     /* paranoia */
@@ -183,14 +213,17 @@ dump_cb(const btrie_oct_t *prefix, unsigned len, const void *data, int post,
     data = ctx->parent_data[ctx->depth];
   }
 
-  if (data != ctx->prev_rr) {
+  meta = data;
+  rr = meta ? meta->rr : NULL;
+
+  if (rr != ctx->prev_rr) {
     if (memcmp(addr, ctx->prev_addr, IP6ADDR_FULL) != 0) {
       if (ctx->prev_rr)
         dump_ip6range(ctx->prev_addr, addr, ctx->prev_rr, ctx->ds, ctx->f);
       memcpy(ctx->prev_addr, addr, IP6ADDR_FULL);
     }
     /* else addr unchanged => zero-length range, ignore */
-    ctx->prev_rr = data;
+    ctx->prev_rr = rr;
   }
   /* else rr unchanged => merge current range with previous */
 }

@@ -84,6 +84,7 @@ add_executable(rbldnsd
         rbldnsd_dnhash.c
         rbldnsd_dnhash_fixed.c
         rbldnsd_dnset.c
+        rbldnsd_entryparams.c
         rbldnsd_generic.c
         rbldnsd_ip4set.c
         rbldnsd_ip4trie.c

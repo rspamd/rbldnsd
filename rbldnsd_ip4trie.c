@@ -37,6 +37,8 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
   int bits;
   const char *rr;
   unsigned rrl;
+  char *params_s = NULL;
+  const struct kv_params *params = NULL;
 
   int not, ipv6 = 0;
 
@@ -98,6 +100,8 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
     rr = NULL;
   else {
     SKIPSPACE(s);
+    rbldnsd_split_entry_params(s, &params_s);
+    params = rbldnsd_parse_kv_params(ds->ds_mp, dsc, params_s);
     if (!*s || ISCOMMENT(*s))
       rr = dsd->def_rr;
     else if (!(rrl = parse_a_txt(s, &rr, dsd->def_rr, dsc)))
@@ -106,17 +110,24 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
       return 0;
   }
 
+  struct entry_meta *meta = mp_alloc(ds->ds_mp, sizeof(*meta), 1);
+  if (!meta) {
+    return 0;
+  }
+  meta->rr = rr;
+  meta->params = params;
+
   int ret = -1;
 
   if (ipv6) {
-    ret = btrie_add_prefix(dsd->btrie, ipv6_addr, bits, rr);
+    ret = btrie_add_prefix(dsd->btrie, ipv6_addr, bits, meta);
   }
   else {
     memset(ipv6_addr, 0, 10);
     ipv6_addr[10] = 0xffu;
     ipv6_addr[11] = 0xffu;
     ip4unpack(ipv6_addr + 12, a);
-    ret = btrie_add_prefix(dsd->btrie, ipv6_addr, 96 + bits, rr);
+    ret = btrie_add_prefix(dsd->btrie, ipv6_addr, 96 + bits, meta);
   }
 
   switch(ret) {
@@ -151,6 +162,7 @@ static void ds_ip4trie_finish(struct dataset *ds, struct dsctx *dsc) {
 static int
 ds_ip4trie_query(const struct dataset *ds, const struct dnsqinfo *qi,
                  struct dnspacket *pkt) {
+  const struct entry_meta *meta;
   const char *rr;
   btrie_oct_t addr_bytes[IP6ADDR_FULL];
 
@@ -162,19 +174,33 @@ ds_ip4trie_query(const struct dataset *ds, const struct dnsqinfo *qi,
     addr_bytes[10] = 0xffu;
     addr_bytes[11] = 0xffu;
     ip4unpack(addr_bytes + 12, qi->qi_ip4);
-    rr = btrie_lookup(ds->ds_dsd->btrie, addr_bytes, 8 * IP6ADDR_FULL);
+    meta = btrie_lookup(ds->ds_dsd->btrie, addr_bytes, 8 * IP6ADDR_FULL);
   }
   else if (qi->qi_ip6valid) {
     check_query_overwrites(qi);
 
-    rr = btrie_lookup(ds->ds_dsd->btrie, qi->qi_ip6, 8 * IP6ADDR_FULL);
+    meta = btrie_lookup(ds->ds_dsd->btrie, qi->qi_ip6, 8 * IP6ADDR_FULL);
   }
   else {
     return 0;
   }
 
-  if (!rr)
+  if (!meta || !meta->rr)
     return 0;
+
+  struct entry_action act;
+  act.allow = 1;
+  act.delay_ms = 0;
+  act.flags = 0;
+  rbldnsd_apply_entry_params(pkt->p_peer, ds, qi, meta->params, &act);
+  if (!act.allow) {
+    return 0;
+  }
+  if (act.delay_ms > pkt->p_delay_ms) {
+    pkt->p_delay_ms = act.delay_ms;
+  }
+
+  rr = meta->rr;
 
   const char *subst = NULL;
 
@@ -225,6 +251,8 @@ dump_cb(const btrie_oct_t *prefix, unsigned len, const void *data, int post,
 {
   struct dump_context *ctx = user_data;
   ip4addr_t addr;
+  const struct entry_meta *meta;
+  const char *rr;
 
   if (len > 32)
     return;                     /* paranoia (or ipv6 for now, gah) */
@@ -253,14 +281,17 @@ dump_cb(const btrie_oct_t *prefix, unsigned len, const void *data, int post,
     data = ctx->parent_data[ctx->depth];
   }
 
-  if (data != ctx->prev_rr) {
+  meta = data;
+  rr = meta ? meta->rr : NULL;
+
+  if (rr != ctx->prev_rr) {
     if (addr != ctx->prev_addr) {
       if (ctx->prev_rr)
         dump_ip4range(ctx->prev_addr, addr - 1, ctx->prev_rr, ctx->ds, ctx->f);
       ctx->prev_addr = addr;
     }
     /* else addr unchanged => zero-length range, ignore */
-    ctx->prev_rr = data;
+    ctx->prev_rr = rr;
   }
   /* else rr unchanged => merge current range with previous */
 }
