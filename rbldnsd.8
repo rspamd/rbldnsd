@@ -99,6 +99,8 @@ in the single (set of) source files, for easy maintenance.
 .IP
 acl, or Access Control List.  This is a pseudo dataset, that works
 by overweriting query results based on the requestor (peer) IP address.
+An additional keyed variant (\fBaclkey\fR) may be used to apply ACL actions based
+on an extra label embedded into the query name.
 
 .SH OPTIONS
 
@@ -602,6 +604,45 @@ This dataset type may be used instead of \fBip4set\fR,
 provided all CIDR ranges are expanded and reversed (but in
 this case, TXT template will be expanded differently).
 
+.SS "dnhash Dataset"
+.PP
+Hashed set of (possible wildcarded) domain names with associated A and TXT values.
+This dataset is functionally similar to \fBdnset\fR, but uses hashing for
+faster lookups on large RHSBL\-style lists.
+.PP
+The input syntax is the same as \fBdnset\fR: one domain name per line,
+wildcards may be specified as \fB*.example.com\fR (subdomains only) or
+\fB.example.com\fR (both the domain itself and all its subdomains), and
+an entry starting with \fB!\fR excludes a name from being listed.
+The default A and TXT template for subsequent entries may be specified by a line
+starting with a colon (see section "Resulting A values and TXT templates").
+.PP
+Note: wildcarded entries are limited to a small number of labels.
+If a wildcarded domain name contains too many labels, it will be rejected.
+
+.SS "dnhash_fixed Dataset"
+.PP
+Set of (domain name, value) pairs using a fixed\-size key stored in the first DNS
+label.  This dataset matches \fIonly\fR names whose first label length is equal to
+the compile\-time \fBFIXED_HASHLEN\fR constant (32 bytes by default).
+The value associated with a key is an A+TXT template, using the same syntax as
+other datasets (see section "Resulting A values and TXT templates").
+.PP
+This dataset is intended for use cases where queries contain an opaque token in the
+left\-most label.  For practical operation, tokens are usually encoded using
+DNS\-safe characters (for example, hex/base32) so they can be generated and queried
+by ordinary clients; in that case \fBFIXED_HASHLEN\fR should match the encoded token
+length.
+.PP
+Keys are specified as domain names in the dataset file.  The first label must be
+exactly \fBFIXED_HASHLEN\fR bytes long; additional labels (if present) are not used
+for the key match.  If you need to embed arbitrary bytes in a label, \fBrbldnsd\fR
+supports backslash\-escaped decimal byte values (\fB\\123\fR) in domain names.
+For example (assuming \fBFIXED_HASHLEN=32\fR):
+.nf
+  0123456789abcdef0123456789abcdef :2:Listed token
+.fi
+
 .SS "generic Dataset"
 .PP
 Generic type, simplified bind\-style format.  Every record
@@ -870,6 +911,37 @@ ACL dataset, it will use client IP address to substitute for a
 single $ character, instead of the IP address or domain name
 found in the original query.
 
+.SS "aclkey Dataset"
+.PP
+Keyed Access Control List dataset.
+This dataset is similar to \fBacl\fR but is keyed by an extra DNS label present in
+the query name (relative to the zone).
+When a query is received, \fBrbldnsd\fR treats the \fIright\-most\fR label of the
+relative name as a key, checks it against the configured key list, and then
+\fIremoves\fR that label before performing the actual dataset lookup.
+.PP
+For example, if the served zone is \fBbl.example.com\fR and a client queries
+\fB2.0.0.127.secret.bl.example.com\fR, then \fBsecret\fR is treated as the key and the
+remaining name \fB2.0.0.127\fR is looked up in the other datasets for the zone.
+.PP
+The dataset file contains one key per line, with an optional action/value:
+.IP \fIkey\fR
+Use the current default action for this key.
+.IP "\fIkey\fR \fB:pass\fR"
+Allow queries that contain this key to be processed normally.
+.IP "\fIkey\fR \fB:ignore\fR | \fB:refuse\fR | \fB:empty\fR"
+Apply the corresponding action for queries that contain this key.
+.IP "\fIkey\fR \fIa_txt_template\fR"
+Always return "listed" for queries that contain this key, using the specified
+A+TXT template (same syntax as in other datasets).
+.PP
+The default action/value can be set by a line starting with \fB:\fR or \fB=\fR.
+A typical setup is to use \fB:ignore\fR as the default and explicitly \fB:pass\fR the
+allowed keys.
+.PP
+When request logging is enabled (\fB\-l\fR option), the extracted key is appended to
+the log line.
+
 .SH SIGNALS
 
 .B Rbldnsd
@@ -901,6 +973,14 @@ period.
 
 .PP
 Some unsorted usage notes follows.
+
+.SS "Vectorized UDP I/O"
+.PP
+On platforms that support \fBrecvmmsg\fR(2) and \fBsendmmsg\fR(2), \fBrbldnsd\fR may
+use vectorized system calls to receive and send multiple UDP datagrams per syscall.
+This is a build\-time feature and is typically available on Linux; on other
+platforms, \fBrbldnsd\fR falls back to regular \fBrecvfrom\fR(2)/\fBsendto\fR(2)
+operations.
 
 .SS "Generating and transferring data files"
 .PP
