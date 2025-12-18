@@ -1,7 +1,7 @@
 This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
-0.999 (Still not official, to be released)
+1.0.0 (18 Dec 2025)
  - Removal of deprecated features (aka: NS record compatibility mode)
  - Adding -F flag, used to identify the log facility of the daemon.
  - fix tests for systems without ipv6 support, or when ipv6 is
@@ -18,6 +18,11 @@ Newer news is at the top.
  - Maintenance of RPM spec file to match new file locations, versions,
    and the make dist tar file naming schema.
  - Fix for sockaddr_equal() which was missing an IPv6 case.
+ - New dataset types: dnhash/dnhash_fixed with bloom-filter acceleration and aclkey
+ - Per-entry params: delay/cooldown support with aclkey integration
+ - Updateable zones (dynamic updates) and unix socket listen support
+ - Performance improvements: libev-based loop and vectorized datagram processing
+ - Modernized build/CI/packaging: CMake build system, GitHub Actions, Robot Framework functional tests
 
 0.998b (21 Dec 2016)
  - Fix for memory errors on very large datasets.
