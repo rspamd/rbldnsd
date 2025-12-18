@@ -442,6 +442,43 @@ and usage examples.
 Set the base template for all individual TXT records.  See section
 "Resulting A values and TXT templates" below for more information.
 
+.SS "Per-entry parameters"
+.PP
+Some dataset types support optional per-entry parameters.  Parameters are
+introduced by a \fB@\fR token following the entry value and consist of
+key/value pairs separated by \fB:\fR or \fB;\fR.
+.PP
+Supported dataset types:
+.IP \(bu
+\fBip4trie\fR
+.IP \(bu
+\fBip6trie\fR
+.IP \(bu
+\fBdnhash\fR
+.PP
+Examples:
+.nf
+  1.2.3.0/24 :127.0.0.2:Listed @ delay=2s
+  example.tld TXT "Listed" @ ts=1730000000;delay=60s
+.fi
+.PP
+The following built-in parameters are currently recognized:
+.IP "\fBdelay=\fR\fIduration\fR"
+Delay sending the reply for a matching entry.  The value uses the same
+syntax as \fBparse_time()\fR (e.g. \fB60\fR, \fB60s\fR, \fB10m\fR, \fB1h\fR).
+.IP "\fBts=\fR\fIunix_timestamp\fR"
+UNIX timestamp in seconds.  When used together with \fBdelay\fR, the entry
+is suppressed until the cooling time is over, i.e. the entry is returned only
+when \fBnow >= ts + delay\fR.
+.IP "\fBkey=require\fR"
+Return the entry only for \fIkeyed\fR requests.  A request is considered keyed
+when the zone has an \fBaclkey\fR dataset configured and a valid key label is
+present in the queried name (\fBaclkey\fR removes that label before the actual
+dataset lookup).
+.IP "\fBkey=nodelay\fR"
+For keyed requests, bypass both reply delaying (\fBdelay\fR without \fBts\fR)
+and cooldown suppression (\fBts\fR+\fBdelay\fR) for the matching entry.
+
 .SS "ip4set Dataset"
 .PP
 A set of IP addresses or CIDR address ranges, together with A and
