@@ -191,6 +191,7 @@ ds_ip4trie_query(const struct dataset *ds, const struct dnsqinfo *qi,
   struct entry_action act;
   act.allow = 1;
   act.delay_ms = 0;
+  act.flags = 0;
   rbldnsd_apply_entry_params(pkt->p_peer, ds, qi, meta->params, &act);
   if (!act.allow) {
     return 0;

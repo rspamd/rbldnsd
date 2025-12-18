@@ -73,7 +73,11 @@ struct entry_meta {
 struct entry_action {
   int allow;
   unsigned delay_ms;
+  unsigned flags;
 };
+
+#define ENTRY_ACTION_STOP   0x01u
+#define ENTRY_ACTION_NODELAY 0x02u
 
 typedef int (*entry_params_handler_t)(const struct sockaddr *requestor,
                                       const struct dataset *ds,
