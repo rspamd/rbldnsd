@@ -874,6 +874,24 @@ break;
 
 struct dnsstats gstats;
 static struct dnsstats gptot;
+
+static time_t g_cached_time;
+static ev_timer cached_time_timer;
+
+static void
+cached_time_cb(struct ev_loop *UNUSED loop, ev_timer *UNUSED w, int UNUSED revents)
+{
+  g_cached_time = time(NULL);
+}
+
+time_t
+rbldnsd_cached_time(void)
+{
+  if (g_cached_time == 0) {
+    g_cached_time = time(NULL);
+  }
+  return g_cached_time;
+}
 static time_t stats_time;
 
 static void dumpstats(void) {
@@ -1701,6 +1719,11 @@ int main(int argc, char **argv) {
 
   init(argc, argv, loop);
   delayed_init(loop);
+
+  g_cached_time = time(NULL);
+  ev_timer_init(&cached_time_timer, cached_time_cb, 0.0, 1.0);
+  ev_timer_start(loop, &cached_time_timer);
+
   setup_signals(loop);
   reopenlog();
   can_reload = 1;

@@ -3,7 +3,6 @@
  */
 
 #include <string.h>
-#include <time.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -167,7 +166,7 @@ rbldnsd_builtin_entry_params_handler(const struct sockaddr *UNUSED requestor,
 
   if (have_ts && have_delay) {
     unsigned long long ready = ts + (unsigned long long)delay_sec;
-    unsigned long long now = (unsigned long long)time(NULL);
+    unsigned long long now = (unsigned long long)rbldnsd_cached_time();
     if (now < ready) {
       action->allow = 0;
       action->flags |= ENTRY_ACTION_STOP;
