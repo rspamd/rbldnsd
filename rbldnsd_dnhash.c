@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <limits.h>
 #include <syslog.h>
 
 #include "khash.h"
@@ -294,9 +295,151 @@ KHASH_INIT(dnhash, struct key, struct entry, 1, key_hash_func, key_eq_func);
  * for plain entries and for wildcard entries.
  */
 #define MAX_WILDCARD 5
+
+/* bloom filter for negative lookups */
+#define DNHASH_BLOOM_BITS_PER_ENTRY 10U
+#define DNHASH_BLOOM_K 3U
+#define DNHASH_BLOOM_MIN_BITS (1U << 12)
+#define DNHASH_BLOOM_MAX_BYTES (8U * 1024U * 1024U)
+
+struct dnhash_bloom {
+  uint32_t nbits;
+  uint32_t mask;
+  uint8_t k;
+  uint64_t bits[];
+};
+
+static inline size_t
+dnhash_pow2_round_up(size_t x)
+{
+  if (x <= 1) {
+    return 1;
+  }
+
+  x--;
+  for (size_t s = 1; s < sizeof(size_t) * 8; s <<= 1) {
+    x |= x >> s;
+  }
+  return x + 1;
+}
+
+static inline size_t
+dnhash_pow2_round_down(size_t x)
+{
+  if (x == 0) {
+    return 0;
+  }
+
+  return dnhash_pow2_round_up(x + 1) >> 1;
+}
+
+static inline uint64_t
+dnhash_bloom_mix(uint64_t x)
+{
+  x += 0x9e3779b97f4a7c15ULL;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+  return x ^ (x >> 31);
+}
+
+static inline uint64_t
+dnhash_bloom_hash(const unsigned char *p, unsigned len)
+{
+  return (uint64_t)ARCH_STR_HASH((const char *)p, len);
+}
+
+static inline void
+dnhash_bloom_add(struct dnhash_bloom *b, const unsigned char *p, unsigned len)
+{
+  uint64_t h1 = dnhash_bloom_hash(p, len);
+  uint64_t h2 = dnhash_bloom_mix(h1 ^ 0x3c79ac492ba7b653ULL);
+
+  for (unsigned i = 0; i < b->k; i++) {
+    uint32_t idx = (uint32_t)((h1 + (uint64_t)i * h2) & b->mask);
+    b->bits[idx >> 6] |= 1ULL << (idx & 63);
+  }
+}
+
+static inline int
+dnhash_bloom_maybe_has(const struct dnhash_bloom *b, const unsigned char *p,
+                       unsigned len)
+{
+  uint64_t h1 = dnhash_bloom_hash(p, len);
+  uint64_t h2 = dnhash_bloom_mix(h1 ^ 0x3c79ac492ba7b653ULL);
+
+  for (unsigned i = 0; i < b->k; i++) {
+    uint32_t idx = (uint32_t)((h1 + (uint64_t)i * h2) & b->mask);
+    if ((b->bits[idx >> 6] & (1ULL << (idx & 63))) == 0) {
+      return 0;
+    }
+  }
+
+  return 1;
+}
+
+static struct dnhash_bloom *
+dnhash_bloom_create(struct dataset *ds, size_t nbits)
+{
+  if (nbits < DNHASH_BLOOM_MIN_BITS) {
+    return NULL;
+  }
+
+  size_t rounded = dnhash_pow2_round_up(nbits);
+  if (rounded < nbits) {
+    /* overflow during rounding */
+    return NULL;
+  }
+  nbits = rounded;
+
+  /* Keep mask/index math in uint32_t and protect mp_alloc(unsigned) */
+  if (nbits > (1ULL << 31) || nbits > (size_t)DNHASH_BLOOM_MAX_BYTES * 8) {
+    return NULL;
+  }
+
+  size_t nwords = (nbits + 63) / 64;
+  if (nwords > (SIZE_MAX - sizeof(struct dnhash_bloom)) / sizeof(uint64_t)) {
+    return NULL;
+  }
+  size_t alloc_size = sizeof(struct dnhash_bloom) + nwords * sizeof(uint64_t);
+  if (alloc_size > UINT_MAX) {
+    return NULL;
+  }
+
+  struct dnhash_bloom *b = mp_alloc(ds->ds_mp, (unsigned)alloc_size, 1);
+  if (!b) {
+    return NULL;
+  }
+
+  b->nbits = (uint32_t)nbits;
+  b->mask = (uint32_t)(nbits - 1);
+  b->k = (uint8_t)DNHASH_BLOOM_K;
+  memset(b->bits, 0, nwords * sizeof(uint64_t));
+
+  return b;
+}
+
+static struct dnhash_bloom *
+dnhash_bloom_build(struct dataset *ds, khash_t(dnhash) *h, size_t nbits)
+{
+  struct dnhash_bloom *b = dnhash_bloom_create(ds, nbits);
+  if (!b) {
+    return NULL;
+  }
+
+  struct key k;
+  struct entry e;
+  kh_foreach(h, k, e, {
+    dnhash_bloom_add(b, k.ldn, k.len);
+  });
+
+  return b;
+}
+
 struct dsdata {
   khash_t(dnhash) *direct;
   khash_t(dnhash) *wild[MAX_WILDCARD];
+  struct dnhash_bloom *direct_bloom;
+  struct dnhash_bloom *wild_bloom[MAX_WILDCARD];
   const char *def_rr;		/* default A and TXT RRs */
   int w_maxlab;
 };
@@ -307,6 +450,10 @@ static void ds_dnhash_reset(struct dsdata *dsd, int UNUSED unused_freeall) {
   kh_clear(dnhash, dsd->direct);
   for (int i = 0; i < MAX_WILDCARD; i ++) {
     kh_clear(dnhash, dsd->wild[i]);
+  }
+  dsd->direct_bloom = NULL;
+  for (int i = 0; i < MAX_WILDCARD; i++) {
+    dsd->wild_bloom[i] = NULL;
   }
   dsd->w_maxlab = 0;
 }
@@ -319,14 +466,17 @@ static void ds_dnhash_start(struct dataset *ds) {
 
   if (dsd->direct == NULL) {
     dsd->direct = kh_init(dnhash);
+    dsd->direct_bloom = NULL;
     for (int i = 0; i < MAX_WILDCARD; i++) {
       dsd->wild[i] = kh_init(dnhash);
+      dsd->wild_bloom[i] = NULL;
     }
   }
 }
 
 static int
 ds_dnhash_addent(khash_t(dnhash) *h,
+                struct dnhash_bloom *bloom,
                 const unsigned char *ldn,
                 const char *rr,
                 unsigned dnlen) {
@@ -345,6 +495,10 @@ ds_dnhash_addent(khash_t(dnhash) *h,
 
   e = &kh_value(h, k);
   e->rr = rr;
+
+  if (bloom && ret > 0) {
+    dnhash_bloom_add(bloom, ldn, dnlen);
+  }
 
   return 1;
 }
@@ -426,13 +580,14 @@ ds_dnhash_line(struct dataset *ds, char *s, struct dsctx *dsc) {
       dsd->w_maxlab = dnlab;
     }
 
-    if (!ds_dnhash_addent(dsd->wild[dnlab - 1], ldn, rr, dnlen - 1)) {
+    if (!ds_dnhash_addent(dsd->wild[dnlab - 1], dsd->wild_bloom[dnlab - 1],
+                          ldn, rr, dnlen - 1)) {
       return 0;
     }
   }
 
   if (isplain) {
-    if (!ds_dnhash_addent(dsd->direct, ldn, rr, dnlen - 1)) {
+    if (!ds_dnhash_addent(dsd->direct, dsd->direct_bloom, ldn, rr, dnlen - 1)) {
       return 0;
     }
   }
@@ -447,6 +602,73 @@ ds_dnhash_update(struct dataset *ds, char *s, struct dsctx *dsc) {
 
 static void ds_dnhash_finish(struct dataset *ds, struct dsctx *dsc) {
   struct dsdata *dsd = ds->ds_dsd;
+
+  enum { DNHASH_NTABLES = MAX_WILDCARD + 1 };
+  size_t nent[DNHASH_NTABLES];
+  size_t raw_bits[DNHASH_NTABLES];
+  size_t bits[DNHASH_NTABLES];
+
+  nent[0] = kh_size(dsd->direct);
+  for (int i = 0; i < MAX_WILDCARD; i++) {
+    nent[i + 1] = kh_size(dsd->wild[i]);
+  }
+
+  size_t sum_raw = 0;
+  for (int i = 0; i < DNHASH_NTABLES; i++) {
+    size_t raw = nent[i] * (size_t)DNHASH_BLOOM_BITS_PER_ENTRY;
+    if (raw < DNHASH_BLOOM_MIN_BITS) {
+      raw = 0;
+    }
+    raw_bits[i] = raw;
+    sum_raw += raw;
+  }
+
+  size_t sum_bits = 0;
+  for (int i = 0; i < DNHASH_NTABLES; i++) {
+    bits[i] = raw_bits[i] ? dnhash_pow2_round_up(raw_bits[i]) : 0;
+    sum_bits += bits[i];
+  }
+
+  const size_t cap_bits = (size_t)DNHASH_BLOOM_MAX_BYTES * 8;
+  if (sum_bits > cap_bits && sum_raw > 0) {
+    sum_bits = 0;
+    for (int i = 0; i < DNHASH_NTABLES; i++) {
+      size_t scaled = raw_bits[i] ? (raw_bits[i] * cap_bits) / sum_raw : 0;
+      bits[i] = scaled ? dnhash_pow2_round_down(scaled) : 0;
+      if (bits[i] < DNHASH_BLOOM_MIN_BITS) {
+        bits[i] = 0;
+      }
+      sum_bits += bits[i];
+    }
+
+    while (sum_bits > cap_bits) {
+      int max_i = -1;
+      size_t max_b = 0;
+      for (int i = 0; i < DNHASH_NTABLES; i++) {
+        if (bits[i] > max_b) {
+          max_b = bits[i];
+          max_i = i;
+        }
+      }
+      if (max_i == -1 || max_b <= DNHASH_BLOOM_MIN_BITS) {
+        break;
+      }
+      bits[max_i] >>= 1;
+      if (bits[max_i] < DNHASH_BLOOM_MIN_BITS) {
+        bits[max_i] = 0;
+      }
+
+      sum_bits = 0;
+      for (int i = 0; i < DNHASH_NTABLES; i++) {
+        sum_bits += bits[i];
+      }
+    }
+  }
+
+  dsd->direct_bloom = dnhash_bloom_build(ds, dsd->direct, bits[0]);
+  for (int i = 0; i < MAX_WILDCARD; i++) {
+    dsd->wild_bloom[i] = dnhash_bloom_build(ds, dsd->wild[i], bits[i + 1]);
+  }
 
   unsigned nwild = 0;
   for (int i = 0; i < MAX_WILDCARD; i ++) {
@@ -474,24 +696,27 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
   /* First, search for plain match */
   srch.len = qi->qi_dnlen0;
   srch.ldn = dn;
-  k = kh_get(dnhash, dsd->direct, srch);
 
-  if (k != kh_end(dsd->direct)) {
-    e = &kh_value(dsd->direct, k);
+  if (!dsd->direct_bloom || dnhash_bloom_maybe_has(dsd->direct_bloom, dn, srch.len)) {
+    k = kh_get(dnhash, dsd->direct, srch);
 
-    /* Exclusion must override any wildcard matches (same semantics as dnset). */
-    if (!e->rr) {
-      return 0;
+    if (k != kh_end(dsd->direct)) {
+      e = &kh_value(dsd->direct, k);
+
+      /* Exclusion must override any wildcard matches (same semantics as dnset). */
+      if (!e->rr) {
+        return 0;
+      }
+
+      if (qi->qi_tflag & NSQUERY_TXT) {
+        pkey = &kh_key(dsd->direct, k);
+        dns_dntop(pkey->ldn + 1, name, sizeof(name));
+      }
+
+      addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
+
+      return NSQUERY_FOUND;
     }
-
-    if (qi->qi_tflag & NSQUERY_TXT) {
-      pkey = &kh_key(dsd->direct, k);
-      dns_dntop(pkey->ldn + 1, name, sizeof(name));
-    }
-
-    addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
-
-    return NSQUERY_FOUND;
   }
 
   /* Now check for wildcards */
@@ -512,20 +737,24 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
 
     srch.len = qlen0;
     srch.ldn = dn;
-    k = kh_get(dnhash, dsd->wild[qlab - 1], srch);
 
-    if (k != kh_end(dsd->wild[qlab - 1])) {
-      e = &kh_value(dsd->wild[qlab - 1], k);
+    struct dnhash_bloom *wb = dsd->wild_bloom[qlab - 1];
+    if (!wb || dnhash_bloom_maybe_has(wb, dn, srch.len)) {
+      k = kh_get(dnhash, dsd->wild[qlab - 1], srch);
 
-      if (qi->qi_tflag & NSQUERY_TXT) {
-        pkey = &kh_key(dsd->wild[qlab - 1], k);
-        dns_dntop(pkey->ldn + 1, name, sizeof(name));
-      }
+      if (k != kh_end(dsd->wild[qlab - 1])) {
+        e = &kh_value(dsd->wild[qlab - 1], k);
 
-      if (e->rr) {
-        addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
+        if (qi->qi_tflag & NSQUERY_TXT) {
+          pkey = &kh_key(dsd->wild[qlab - 1], k);
+          dns_dntop(pkey->ldn + 1, name, sizeof(name));
+        }
 
-        return NSQUERY_FOUND;
+        if (e->rr) {
+          addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
+
+          return NSQUERY_FOUND;
+        }
       }
     }
 
