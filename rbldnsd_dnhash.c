@@ -787,6 +787,9 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
 
           return NSQUERY_FOUND;
         }
+      }
+    }
+
     }
 
     /* remove next label at the end of rdn */
