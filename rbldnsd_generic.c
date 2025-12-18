@@ -238,7 +238,7 @@ ds_generic_query(const struct dataset *ds, const struct dnsqinfo *qi,
   const struct dsdata *dsd = ds->ds_dsd;
   const unsigned char *dn = qi->qi_dn;
   const struct entry *e, *t, *l;
-  unsigned qt = qi->qi_tflag;
+  unsigned qt = qi->qi_tflag & NSQUERY_ANY;
 
   if (qi->qi_dnlab > dsd->maxlab || qi->qi_dnlab < dsd->minlab)
     return 0;

@@ -703,16 +703,19 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
     if (k != kh_end(dsd->direct)) {
       e = &kh_value(dsd->direct, k);
 
+      /* Exclusion must override any wildcard matches (same semantics as dnset). */
+      if (!e->rr) {
+        return 0;
+      }
+
       if (qi->qi_tflag & NSQUERY_TXT) {
         pkey = &kh_key(dsd->direct, k);
         dns_dntop(pkey->ldn + 1, name, sizeof(name));
       }
 
-      if (e->rr) {
-        addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
+      addrr_a_txt(pkt, qi->qi_tflag, e->rr, name, ds);
 
-        return NSQUERY_FOUND;
-      }
+      return NSQUERY_FOUND;
     }
   }
 
