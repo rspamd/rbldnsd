@@ -1,112 +1,101 @@
 /* memory pool implementation
+ *
+ * Arena allocator for bulk allocation/deallocation.
+ * All memory is freed at once via mp_free().
  */
 
 #include <stdlib.h>
 #include <string.h>
 #include "mempool.h"
 
-/* A pool of constant (in size) memory blocks which will be
- * freed all at once.  We allocate memory in (relatively)
- * large chunks (MEMPOOL_CHUNKSIZE) and keep list of chunks
- * with some free space within them and list of chunks without
- * sufficient free space.  Mempool is optimized to allocate
- * blocks of approximate equal size (determined dynamically),
- * so free chunks are moved to "used" list when free space
- * becomes less than an average allocated block size.
- */
-
-#define alignto sizeof(void*)
-#define alignmask (alignto-1)
+#define MEMPOOL_CHUNKSIZE (64 * 1024)
+#define ALIGN_SIZE sizeof(void*)
+#define ALIGN_MASK (ALIGN_SIZE - 1)
+#define ALIGN_UP(x) (((x) + ALIGN_MASK) & ~ALIGN_MASK)
 
 void *emalloc(size_t size);
 
-#define MEMPOOL_CHUNKSIZE (65536-sizeof(unsigned)*4)
-
+/*
+ * Single chunk type for all allocations.
+ * Metadata at front, buffer follows via flexible array member.
+ */
 struct mempool_chunk {
-  char buf[MEMPOOL_CHUNKSIZE+alignto];
   struct mempool_chunk *next;
-  unsigned size;
-};
-
-struct mempool_cfull { /* pseudo-chunk: one entry into full list */
-  struct mempool_chunk *next;
-  char buf[1];
+  unsigned capacity;  /* total buffer size */
+  unsigned used;      /* bytes used from end of buffer */
+  char buf[];         /* flexible array member */
 };
 
 void mp_init(struct mempool *mp) {
-  mp->mp_chunk = mp->mp_fullc = NULL;
-  mp->mp_nallocs = mp->mp_datasz = 0;
+  mp->mp_chunk = NULL;
+  mp->mp_nallocs = 0;
+  mp->mp_datasz = 0;
   mp->mp_lastbuf = NULL;
   mp->mp_lastlen = 0;
 }
 
+/*
+ * Allocate a new chunk with given buffer capacity.
+ */
+static struct mempool_chunk *mp_newchunk(struct mempool *mp, unsigned capacity) {
+  struct mempool_chunk *c = emalloc(sizeof(*c) + capacity);
+  if (!c)
+    return NULL;
+  c->next = mp->mp_chunk;
+  c->capacity = capacity;
+  c->used = 0;
+  mp->mp_chunk = c;
+  return c;
+}
+
 void *mp_alloc(struct mempool *mp, unsigned size, int align) {
-  if (size >= MEMPOOL_CHUNKSIZE / 2) {
-    /* for large blocks, allocate separate "full" chunk */
-    struct mempool_cfull *c =
-      (struct mempool_cfull*)emalloc(sizeof(*c)+size-1);
+  struct mempool_chunk *c;
+  unsigned alloc_size;
+  char *ptr;
+
+  if (align)
+    alloc_size = ALIGN_UP(size);
+  else
+    alloc_size = size;
+
+  /* Large allocation: dedicated chunk */
+  if (alloc_size >= MEMPOOL_CHUNKSIZE / 2) {
+    c = mp_newchunk(mp, alloc_size);
     if (!c)
       return NULL;
-    c->next = mp->mp_fullc;
-    mp->mp_fullc = (struct mempool_chunk*)c;
+    c->used = alloc_size;
     return c->buf;
   }
-  else {
-    struct mempool_chunk *c;
-    struct mempool_chunk *best; /* "best fit" chunk */
-    unsigned avg; /* average data size: total size / numallocs */
 
-    ++mp->mp_nallocs; mp->mp_datasz += size;
-    avg = mp->mp_datasz / mp->mp_nallocs;
-
-    /* round size up to a multiple of alignto */
-    if (align)
-      size = (size + alignmask) & ~alignmask;
-
-    for(c = mp->mp_chunk, best = NULL; c; c = c->next)
-      if (c->size >= size && (!best || best->size > c->size)) {
-        best = c;
-        if (c->size - size < avg)
-          break;
-      }
-    
-    if (best != NULL) { /* found a free chunk */
-      char *b;
-      if (align)
-        best->size &= ~alignmask;
-      b = best->buf + MEMPOOL_CHUNKSIZE - best->size;
-      best->size -= size;
-      if (best->size < avg) {
-        struct mempool_chunk **cp = &mp->mp_chunk;
-        while(*cp != best)
-          cp = &(*cp)->next;
-        *cp = best->next;
-        best->next = mp->mp_fullc;
-        mp->mp_fullc = best;
-      }
-      return b;
-    }
-
-    else { /* no sutable chunks -> allocate new one */
-      c = (struct mempool_chunk *)emalloc(sizeof(*c));
-      if (!c)
-        return NULL;
-      c->next = mp->mp_chunk;
-      mp->mp_chunk = c;
-      c->size = MEMPOOL_CHUNKSIZE - size;
-      return c->buf;
+  /* Try to fit in existing chunk */
+  for (c = mp->mp_chunk; c; c = c->next) {
+    unsigned free_space = c->capacity - c->used;
+    if (free_space >= alloc_size) {
+      /* Allocate from end of buffer (grows downward for alignment) */
+      ptr = c->buf + c->capacity - c->used - alloc_size;
+      c->used += alloc_size;
+      mp->mp_nallocs++;
+      mp->mp_datasz += size;
+      return ptr;
     }
   }
+
+  /* Need new chunk */
+  c = mp_newchunk(mp, MEMPOOL_CHUNKSIZE);
+  if (!c)
+    return NULL;
+
+  ptr = c->buf + c->capacity - alloc_size;
+  c->used = alloc_size;
+  mp->mp_nallocs++;
+  mp->mp_datasz += size;
+  return ptr;
 }
 
 void mp_free(struct mempool *mp) {
-  struct mempool_chunk *c;
-  while((c = mp->mp_chunk) != NULL) {
-    mp->mp_chunk = c->next;
-    free(c);
-  }
-  while((c = mp->mp_fullc) != NULL) {
-    mp->mp_fullc = c->next;
+  struct mempool_chunk *c, *next;
+  for (c = mp->mp_chunk; c; c = next) {
+    next = c->next;
     free(c);
   }
   mp_init(mp);
@@ -123,15 +112,20 @@ char *mp_strdup(struct mempool *mp, const char *str) {
   return (char*)mp_memdup(mp, str, strlen(str) + 1);
 }
 
-/* string pool: a pool of _constant_ strings, with minimal
- * elimination of dups (only last request is checked)
+/*
+ * Deduplicating memdup/strdup: returns existing buffer if
+ * content matches the last allocation (simple optimization
+ * for repeated strings during parsing).
  */
-
 const void *mp_dmemdup(struct mempool *mp, const void *buf, unsigned len) {
   if (mp->mp_lastlen == len && memcmp(mp->mp_lastbuf, buf, len) == 0)
     return mp->mp_lastbuf;
-  else if ((buf = mp_memdup(mp, buf, len)) != NULL)
-    mp->mp_lastbuf = buf, mp->mp_lastlen = len;
+
+  buf = mp_memdup(mp, buf, len);
+  if (buf) {
+    mp->mp_lastbuf = buf;
+    mp->mp_lastlen = len;
+  }
   return buf;
 }
 
