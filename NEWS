@@ -1,6 +1,14 @@
 This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
+1.0.1 (31 Jan 2026)
+ - Fix mempool segfault on dataset reload: the arena allocator had a
+   struct layout mismatch causing crashes when reloading dnhash datasets
+   with large bloom filters. Simplified mempool to use a single chunk type.
+ - Fix dnhash TXT substitution returning garbage: the $ placeholder in
+   TXT records was not properly substituted with the matched domain name.
+ - Remove experimental dnhash_fixed dataset type (unused, added complexity)
+
 1.0.0 (18 Dec 2025)
  - Removal of deprecated features (aka: NS record compatibility mode)
  - Adding -F flag, used to identify the log facility of the daemon.
@@ -18,7 +26,7 @@ Newer news is at the top.
  - Maintenance of RPM spec file to match new file locations, versions,
    and the make dist tar file naming schema.
  - Fix for sockaddr_equal() which was missing an IPv6 case.
- - New dataset types: dnhash/dnhash_fixed with bloom-filter acceleration and aclkey
+ - New dataset types: dnhash with bloom-filter acceleration and aclkey
  - Per-entry params: delay/cooldown support with aclkey integration
  - Updateable zones (dynamic updates) and unix socket listen support
  - Performance improvements: libev-based loop and vectorized datagram processing
