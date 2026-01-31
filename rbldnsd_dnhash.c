@@ -719,7 +719,7 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
 
       if (qi->qi_tflag & NSQUERY_TXT) {
         pkey = &kh_key(dsd->direct, k);
-        dns_dntop(pkey->ldn + 1, name, sizeof(name));
+        dns_dntop(pkey->ldn, name, sizeof(name));
       }
 
       if (e->rr) {
@@ -769,7 +769,7 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
 
         if (qi->qi_tflag & NSQUERY_TXT) {
           pkey = &kh_key(dsd->wild[qlab - 1], k);
-          dns_dntop(pkey->ldn + 1, name, sizeof(name));
+          dns_dntop(pkey->ldn, name, sizeof(name));
         }
 
         if (e->rr) {
@@ -814,7 +814,7 @@ ds_dnhash_dump(const struct dataset *ds,
   char name[DNS_MAXDOMAIN+4];
 
   kh_foreach(dsd->direct, k, e, {
-    dns_dntop(k.ldn + 1, name, sizeof(name));
+    dns_dntop(k.ldn, name, sizeof(name));
     dump_a_txt(name, e.rr, name, ds, f);
   });
 
@@ -822,7 +822,7 @@ ds_dnhash_dump(const struct dataset *ds,
     name[0] = '*'; name[1] = '.';
 
     kh_foreach(dsd->wild[i], k, e, {
-      dns_dntop(k.ldn + 1, name + 2, sizeof(name) - 2);
+      dns_dntop(k.ldn, name + 2, sizeof(name) - 2);
       dump_a_txt(name, e.rr, name, ds, f);
     });
   }

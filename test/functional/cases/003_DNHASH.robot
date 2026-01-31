@@ -12,6 +12,20 @@ TEST DNHASH PLAIN MATCH
   Expect Query Status  NOERROR
   Expect Query Result  LISTED
 
+TEST DNHASH TXT SUBSTITUTION
+  [Documentation]  Test that $ in TXT records is substituted with the domain name
+  [Setup]  Zone Setup  dnhash  :2:Domain $ is listed\nlisted.tld\nanother.tld
+  # Query for listed.tld - should get substituted text
+  ${q1} =  Set Variable  listed.tld.${SOA}
+  Query Rbldnsd  ${q1}
+  Expect Query Status  NOERROR
+  Expect Query Result  Domain listed.tld is listed
+  # Query for another.tld - should also get substituted text
+  ${q2} =  Set Variable  another.tld.${SOA}
+  Query Rbldnsd  ${q2}
+  Expect Query Status  NOERROR
+  Expect Query Result  Domain another.tld is listed
+
 TEST DNHASH WILDCARDS AND EXCLUSIONS
   [Setup]  Zone Setup  dnhash  *.wild.tld WILD\n.wild2.tld WILD2\n!excluded.wild2.tld
 
