@@ -82,7 +82,6 @@ add_executable(rbldnsd
         rbldnsd_aclkey.c
         rbldnsd_combined.c
         rbldnsd_dnhash.c
-        rbldnsd_dnhash_fixed.c
         rbldnsd_dnset.c
         rbldnsd_entryparams.c
         rbldnsd_generic.c

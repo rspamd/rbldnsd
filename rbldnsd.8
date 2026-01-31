@@ -657,29 +657,6 @@ starting with a colon (see section "Resulting A values and TXT templates").
 Note: wildcarded entries are limited to a small number of labels.
 If a wildcarded domain name contains too many labels, it will be rejected.
 
-.SS "dnhash_fixed Dataset"
-.PP
-Set of (domain name, value) pairs using a fixed\-size key stored in the first DNS
-label.  This dataset matches \fIonly\fR names whose first label length is equal to
-the compile\-time \fBFIXED_HASHLEN\fR constant (32 bytes by default).
-The value associated with a key is an A+TXT template, using the same syntax as
-other datasets (see section "Resulting A values and TXT templates").
-.PP
-This dataset is intended for use cases where queries contain an opaque token in the
-left\-most label.  For practical operation, tokens are usually encoded using
-DNS\-safe characters (for example, hex/base32) so they can be generated and queried
-by ordinary clients; in that case \fBFIXED_HASHLEN\fR should match the encoded token
-length.
-.PP
-Keys are specified as domain names in the dataset file.  The first label must be
-exactly \fBFIXED_HASHLEN\fR bytes long; additional labels (if present) are not used
-for the key match.  If you need to embed arbitrary bytes in a label, \fBrbldnsd\fR
-supports backslash\-escaped decimal byte values (\fB\\123\fR) in domain names.
-For example (assuming \fBFIXED_HASHLEN=32\fR):
-.nf
-  0123456789abcdef0123456789abcdef :2:Listed token
-.fi
-
 .SS "generic Dataset"
 .PP
 Generic type, simplified bind\-style format.  Every record
