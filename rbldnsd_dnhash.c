@@ -110,20 +110,15 @@ dnhash_bloom_mix(uint64_t x)
   return x ^ (x >> 31);
 }
 
-static inline uint64_t
-dnhash_bloom_hash(const unsigned char *p, unsigned len)
-{
-  return (uint64_t)dns_label_hash(p, len);
-}
-
 static inline void
 dnhash_bloom_add(struct dnhash_bloom *b, const unsigned char *p, unsigned len)
 {
-  uint64_t h1 = dnhash_bloom_hash(p, len);
-  uint64_t h2 = dnhash_bloom_mix(h1 ^ 0x3c79ac492ba7b653ULL);
+  uint32_t h1 = dns_label_hash(p, len);
+  uint64_t mixed = dnhash_bloom_mix(h1);
+  uint32_t h2 = (uint32_t)(mixed >> 32) | 1u;  /* odd for coprimality with power-of-2 size */
 
   for (unsigned i = 0; i < b->k; i++) {
-    uint32_t idx = (uint32_t)((h1 + (uint64_t)i * h2) & b->mask);
+    uint32_t idx = (h1 + i * h2) & b->mask;
     b->bits[idx >> 6] |= 1ULL << (idx & 63);
   }
 }
@@ -132,11 +127,12 @@ static inline int
 dnhash_bloom_maybe_has(const struct dnhash_bloom *b, const unsigned char *p,
                        unsigned len)
 {
-  uint64_t h1 = dnhash_bloom_hash(p, len);
-  uint64_t h2 = dnhash_bloom_mix(h1 ^ 0x3c79ac492ba7b653ULL);
+  uint32_t h1 = dns_label_hash(p, len);
+  uint64_t mixed = dnhash_bloom_mix(h1);
+  uint32_t h2 = (uint32_t)(mixed >> 32) | 1u;
 
   for (unsigned i = 0; i < b->k; i++) {
-    uint32_t idx = (uint32_t)((h1 + (uint64_t)i * h2) & b->mask);
+    uint32_t idx = (h1 + i * h2) & b->mask;
     if ((b->bits[idx >> 6] & (1ULL << (idx & 63))) == 0) {
       return 0;
     }
