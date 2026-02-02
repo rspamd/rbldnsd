@@ -115,7 +115,9 @@ unsigned dns_ptodn(const char *name, unsigned char *dn, unsigned dnsiz);
 unsigned dns_dntop(const unsigned char *dn, char *dst, unsigned dstsiz);
 unsigned dns_dntol(const unsigned char *srcdn, unsigned char *dstdn);
 void dns_lc_len(unsigned char *str, unsigned len);
-#define dns_dnlc(c) ((c) >= 'A' && (c) <= 'Z' ? (c) - 'A' + 'a' : (c))
+/* Lowercase lookup table - avoids branches vs conditional macro */
+extern const unsigned char dns_lc_table[256];
+#define dns_dnlc(c) dns_lc_table[(unsigned char)(c)]
 unsigned dns_dnlen(const unsigned char *dn);
 unsigned dns_dnlabels(const unsigned char *dn);
 /* return number of labels in a dn */

@@ -4,7 +4,7 @@
 #include "dns.h"
 #include <string.h>
 
-const unsigned char lc_map[256] = {
+const unsigned char dns_lc_table[256] = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
@@ -52,22 +52,22 @@ dns_lc_len (unsigned char *str, unsigned size)
 
   for (i = 0; i != fp; i += 4) {
     c1 = s[i], c2 = s[i + 1], c3 = s[i + 2], c4 = s[i + 3];
-    dest[0] = lc_map[c1];
-    dest[1] = lc_map[c2];
-    dest[2] = lc_map[c3];
-    dest[3] = lc_map[c4];
+    dest[0] = dns_lc_table[c1];
+    dest[1] = dns_lc_table[c2];
+    dest[2] = dns_lc_table[c3];
+    dest[3] = dns_lc_table[c4];
     dest += 4;
   }
 
   switch (leftover) {
     case 3:
-      *dest++ = lc_map[(unsigned char)str[i++]];
+      *dest++ = dns_lc_table[(unsigned char)str[i++]];
       /* FALLTHRU */
     case 2:
-      *dest++ = lc_map[(unsigned char)str[i++]];
+      *dest++ = dns_lc_table[(unsigned char)str[i++]];
       /* FALLTHRU */
     case 1:
-      *dest = lc_map[(unsigned char)str[i]];
+      *dest = dns_lc_table[(unsigned char)str[i]];
   }
 
 }
