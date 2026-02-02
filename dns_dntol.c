@@ -2,6 +2,7 @@
  */
 
 #include "dns.h"
+#include "dns_simd.h"
 #include <string.h>
 
 const unsigned char dns_lc_table[256] = {
@@ -42,34 +43,7 @@ const unsigned char dns_lc_table[256] = {
 void
 dns_lc_len (unsigned char *str, unsigned size)
 {
-  unsigned leftover = size % 4;
-  unsigned fp, i;
-  const unsigned char* s = (const unsigned char*) str;
-  char *dest = str;
-  unsigned char c1, c2, c3, c4;
-
-  fp = size - leftover;
-
-  for (i = 0; i != fp; i += 4) {
-    c1 = s[i], c2 = s[i + 1], c3 = s[i + 2], c4 = s[i + 3];
-    dest[0] = dns_lc_table[c1];
-    dest[1] = dns_lc_table[c2];
-    dest[2] = dns_lc_table[c3];
-    dest[3] = dns_lc_table[c4];
-    dest += 4;
-  }
-
-  switch (leftover) {
-    case 3:
-      *dest++ = dns_lc_table[(unsigned char)str[i++]];
-      /* FALLTHRU */
-    case 2:
-      *dest++ = dns_lc_table[(unsigned char)str[i++]];
-      /* FALLTHRU */
-    case 1:
-      *dest = dns_lc_table[(unsigned char)str[i]];
-  }
-
+  dns_simd_lowercase_inplace(str, size);
 }
 
 unsigned dns_dntol(const unsigned char *srcdn, unsigned char *dstdn) {
