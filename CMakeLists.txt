@@ -57,7 +57,6 @@ endif()
 
 configure_file(config.h.in config.h)
 add_definitions("-DHAVE_CONFIG_H")
-add_subdirectory(t1ha)
 add_subdirectory(sds)
 
 add_executable(rbldnsd
@@ -95,7 +94,6 @@ add_executable(rbldnsd
         rbldnsd_zones.c
         ${CMAKE_CURRENT_BINARY_DIR}/dns_nametab.c)
 set_target_properties(rbldnsd PROPERTIES VERSION ${RBLDNSD_VERSION})
-target_link_libraries(rbldnsd t1ha)
 target_link_libraries(rbldnsd sds)
 target_link_libraries(rbldnsd ${RSPAMD_REQUIRED_LIBRARIES} ${CMAKE_REQUIRED_LIBRARIES})
 

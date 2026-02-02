@@ -32,7 +32,7 @@
 #include <netinet/in.h>
 #include "rbldnsd.h"
 #include "khash.h"
-#include "t1ha/t1ha.h"
+#include "dns_hash.h"
 
 struct acl_key {
   unsigned len;
@@ -43,13 +43,10 @@ struct acl_val {
   const char *rr;
 };
 
-
-static unsigned hash_seed = 0xdeadbabe;
-
 static inline int
 key_hash_func(struct acl_key k)
 {
-  return t1ha2_atonce(k.ldn, k.len, hash_seed);
+  return dns_label_hash(k.ldn, k.len);
 }
 
 static inline int
