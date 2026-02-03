@@ -1,3 +1,11 @@
+rbldnsd (1.0.2-1) unstable; urgency=medium
+
+  * Performance: lookup table for dns_dnlc() lowercasing
+  * Performance: SIMD-optimized lowercasing (SSE2/NEON)
+  * Remove t1ha dependency, use hardware CRC32
+
+ -- rbldnsd maintainers <vsevolod@rspamd.com>  Mon, 03 Feb 2026 12:00:00 +0000
+
 rbldnsd (1.0.0-2) unstable; urgency=medium
 
   * Modernize Debian packaging for systemd

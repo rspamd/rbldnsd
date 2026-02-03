@@ -1,6 +1,13 @@
 This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
+1.0.2 (03 Feb 2026)
+ - Performance: Replace dns_dnlc() conditional macro with 256-byte lookup
+   table, eliminating branches during DNS name lowercasing.
+ - Performance: Add SIMD-optimized lowercasing for x86_64 (SSE2) and ARM64
+   (NEON), processing 16 bytes per iteration in parsequery() and dns_lc_len().
+ - Remove t1ha dependency, use dns_label_hash() with hardware CRC32 instead.
+
 1.0.1 (31 Jan 2026)
  - Fix mempool segfault on dataset reload: the arena allocator had a
    struct layout mismatch causing crashes when reloading dnhash datasets
