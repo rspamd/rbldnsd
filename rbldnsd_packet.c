@@ -11,6 +11,7 @@
 #include <netdb.h>
 #include <syslog.h>
 #include "rbldnsd.h"
+#include "dns_simd.h"
 
 #ifndef NO_IPv6
 # ifndef NI_MAXHOST
@@ -114,15 +115,17 @@ parsequery(struct dnspacket *pkt, unsigned qlen,
   q += p_hdrsize;		/* start of qDN */
   d = qry->q_dn;		/* destination lowercased DN */
   while((*d = *q) != 0) {	/* loop by DN lables */
+    unsigned char label_len = *q;
     qry->q_lptr[qlab++] = d++;	/* another label */
-    e = q + *q + 1;		/* end of this label */
-    if (*q > DNS_MAXLABEL	/* too long label? */
+    e = q + label_len + 1;	/* end of this label */
+    if (label_len > DNS_MAXLABEL	/* too long label? */
         || e > x)		/* or it ends past packet? */
       return 0;
-    /* lowercase it */
-    ++q;			/* length */
-    do *d++ = dns_dnlc(*q);	/* lowercase each char */
-    while(++q < e);		/* until end of label */
+    /* bulk copy and lowercase using SIMD */
+    ++q;			/* skip length byte */
+    dns_simd_lowercase(d, q, label_len);
+    d += label_len;
+    q = e;
   }
   /* d points to qDN terminator now */
   qry->q_dnlen = d - qry->q_dn + 1;
