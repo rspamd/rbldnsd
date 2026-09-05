@@ -1,3 +1,13 @@
+rbldnsd (1.0.3-1) unstable; urgency=medium
+
+  * Add SO_REUSEPORT UDP workers with copy-on-write zone sharing (-W).
+  * Replace worker generations after successful zone reloads while old workers
+    keep serving; preserve the old generation on reload failure.
+  * Add worker supervision, delayed-reply draining, and bounded shutdown.
+  * Document multiworker limitations and add lifecycle and Linux memory tests.
+
+ -- rbldnsd maintainers <vsevolod@rspamd.com>  Sat, 05 Sep 2026 21:35:30 +0000
+
 rbldnsd (1.0.2-1) unstable; urgency=medium
 
   * Performance: lookup table for dns_dnlc() lowercasing

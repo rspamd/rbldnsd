@@ -3,7 +3,7 @@
 %global rbldnshome %{_localstatedir}/lib/rbldns
 
 Name:           rbldnsd
-Version:        1.0.2
+Version:        1.0.3
 Release:        1%{?dist}
 Summary:        Small fast daemon to serve DNSBLs
 License:        GPL-2.0-or-later

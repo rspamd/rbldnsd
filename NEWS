@@ -1,6 +1,19 @@
 This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
+1.0.3 (05 Sep 2026)
+ - Add -W worker-count support with separate SO_REUSEPORT UDP sockets,
+   bound before privilege dropping, and copy-on-write sharing of zone data.
+ - Reload changed zones in a stable supervisor while old workers continue
+   serving. Start a replacement generation before gracefully retiring the old
+   workers; retain the old generation if zone loading fails.
+ - Supervise worker exits, drain delayed replies during retirement, and bound
+   shutdown of unresponsive workers. Workers exit if the supervisor disappears.
+ - Multiworker mode supports IP UDP listeners and excludes dynamic updates
+   (-U) and statistics files (-s); SIGUSR1 reports per-worker statistics.
+ - Add lifecycle regressions, including Linux socket distribution and
+   copy-on-write memory checks before and after a changed-zone reload.
+
 1.0.2 (03 Feb 2026)
  - Performance: Replace dns_dnlc() conditional macro with 256-byte lookup
    table, eliminating branches during DNS name lowercasing.

@@ -131,6 +131,19 @@ int lazy;			/* don't return AUTH section by default */
 static int fork_on_reload; /* >0 - perform fork on reloads, <0 - this is a child of reloading parent */
 static int can_reload; /* block reload when another reload is there */
 static int pending_reload = 0;
+#define MAXWORKERS 128
+static int nworkers = 1, is_worker, worker_draining;
+static int worker_sockets[MAXWORKERS][MAXSOCK];
+static ev_io *worker_ios;
+static ev_child worker_reaper;
+static int worker_image_valid = 1, workers_started, worker_replace_pending;
+static int worker_ready_fd = -1;
+struct worker_process { pid_t pid; int control; ev_tstamp deadline; };
+static struct worker_process workers[MAXWORKERS], retiring[MAXWORKERS];
+static void check_expires(void);
+static void replace_workers(struct ev_loop *loop);
+static void worker_shutdown(struct ev_loop *loop);
+static void worker_supervise(struct ev_loop *loop, ev_timer *w, int revents);
 static ev_signal ev_hup, ev_usr1, ev_usr2, ev_term, ev_int;
 #if STATS_IPC_IOVEC
 static struct iovec *stats_iov;
@@ -190,6 +203,7 @@ static void NORETURN usage(int exitcode) {
 " -c check - time interval to check for data file updates (1m)\n"
 " -p pidfile - write pid to specified file\n"
 " -n - do not become a daemon\n"
+" -W count - run 1..128 UDP workers with SO_REUSEPORT (default: 1)\n"
 " -f - fork a child process while reloading zones, to process requests\n"
 "  during reload (may double memory requiriments)\n"
 " -q - quickstart, load zones after backgrounding\n"
@@ -302,6 +316,15 @@ static int newsocket(struct addrinfo *ai) {
   if (fd < 0) {
     if (errno == EAFNOSUPPORT) return 0;
     error(errno, "unable to create socket");
+  }
+  if (nworkers > 1) {
+    int one = 1;
+#ifdef SO_REUSEPORT
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0)
+      error(errno, "unable to enable SO_REUSEPORT");
+#else
+    error(0, "SO_REUSEPORT is not supported on this platform");
+#endif
   }
   getnameinfo(ai->ai_addr, ai->ai_addrlen,
               host, sizeof(host), serv, sizeof(serv),
@@ -569,8 +592,16 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
 
   if (argc <= 1) usage(1);
 
-  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:")) != EOF)
+  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:")) != EOF)
     switch(c) {
+    case 'W': {
+      char *end;
+      long count = strtol(optarg, &end, 10);
+      if (!*optarg || *end || count < 1 || count > MAXWORKERS)
+        error(0, "invalid worker count (expected 1..128)");
+      nworkers = (int)count;
+      break;
+    }
     case 'u': user = optarg; break;
     case 'r': rootdir = optarg; break;
     case 'b':
@@ -753,7 +784,42 @@ break;
     if (!quickstart && !flog) logto |= LOGTO_STDOUT;
   }
 
+  if (nworkers > 1) {
+    if (update_addr)
+      error(0, "-W cannot be combined with dynamic updates (-U)");
+#ifndef NO_STATS
+    if (statsfile)
+      error(0, "-W cannot be combined with a statistics file (-s)");
+#endif
+    for (c = 0; c < nba; ++c)
+      if (bindaddr[c][0] == '/' || bindaddr[c][0] == '.')
+        error(0, "-W requires IP UDP listening addresses");
+  }
   initsockets(bindaddr, sock, nba, family);
+  if (nworkers > 1) {
+    /* Bind all slots before chroot/setuid, including privileged ports.
+     * The supervisor retains these descriptors across generations. */
+    for (int i = 0; i < numsock; ++i) {
+      struct sockaddr_storage addr;
+      socklen_t len = sizeof(addr);
+      if (getsockname(sock[i], (struct sockaddr *)&addr, &len) < 0)
+        error(errno, "getsockname failed");
+      worker_sockets[0][i] = sock[i];
+      for (int j = 1; j < nworkers; ++j) {
+        int one = 1, size = 65536;
+        int fd = socket(addr.ss_family, SOCK_DGRAM, 0);
+        if (fd < 0) error(errno, "worker socket failed");
+#ifdef SO_REUSEPORT
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0)
+          error(errno, "worker SO_REUSEPORT failed");
+#endif
+        if (bind(fd, (struct sockaddr *)&addr, len) < 0)
+          error(errno, "worker bind failed");
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
+        worker_sockets[j][i] = fd;
+      }
+    }
+  }
 
   if (update_addr) {
     if (initsockets(&update_addr, &update_sock, 1, family) != 1) {
@@ -854,8 +920,11 @@ break;
   initialized = 1;
 
   if (cfd >= 0) {
-    write(cfd, "", 1);
-    close(cfd);
+    if (nworkers > 1 && !quickstart) worker_ready_fd = cfd;
+    else {
+      write(cfd, "", 1);
+      close(cfd);
+    }
     close(0); close(2);
     if (!flog) close(1);
     setsid();
@@ -866,7 +935,7 @@ break;
     do_reload(0, loop);
 
   /* only set "main" fork_on_reload after first reload */
-  fork_on_reload = forkon;
+  fork_on_reload = nworkers > 1 ? 0 : forkon;
 }
 
 #ifndef NO_STATS
@@ -881,6 +950,7 @@ static void
 cached_time_cb(struct ev_loop *UNUSED loop, ev_timer *UNUSED w, int UNUSED revents)
 {
   g_cached_time = time(NULL);
+  if (is_worker) check_expires();
 }
 
 time_t
@@ -1107,6 +1177,8 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
     return 1;	/* nothing to reload */
   }
 
+  if (nworkers > 1) do_fork = 0;
+
   if (do_fork) {
     int pfd[2];
     if (flog && !flushlog)
@@ -1240,6 +1312,19 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
     }
   }
 
+  if (nworkers > 1 && workers_started) {
+    worker_image_valid = r;
+    if (r) replace_workers(loop);
+    else {
+      /* A failed load may have changed part of the owner's image. Never
+       * fork it; force every dataset to be reconsidered on the next try. */
+      struct dataset *retry = NULL;
+      while ((retry = nextdataset(retry)) != NULL)
+        for (struct dsfile *f = retry->ds_dsf; f; f = f->dsf_next)
+          f->dsf_stamp = 0;
+      dslog(LOG_WARNING, 0, "reload failed; keeping old workers");
+    }
+  }
   return r;
 }
 
@@ -1340,6 +1425,7 @@ static void delayed_timer_cb(struct ev_loop *loop, ev_timer *w, int revents) {
   }
 
   delayed_schedule_timer(loop);
+  if (worker_draining && !delayed_heap_len) ev_break(loop, EVBREAK_ALL);
 }
 
 static void delayed_init(struct ev_loop *loop) {
@@ -1605,6 +1691,9 @@ ev_update_handler(struct ev_loop *loop, ev_io *w, int revents)
 static void
 ev_usr1_handler (struct ev_loop *loop, ev_signal *w, int revents)
 {
+  if (nworkers > 1 && !is_worker)
+    for (int i = 0; i < nworkers; ++i)
+      if (workers[i].pid) kill(workers[i].pid, SIGUSR1);
   if (statsfile) {
     dumpstats();
   }
@@ -1615,6 +1704,9 @@ ev_usr1_handler (struct ev_loop *loop, ev_signal *w, int revents)
 static void
 ev_usr2_handler(struct ev_loop *loop, ev_signal *w, int revents)
 {
+  if (nworkers > 1 && !is_worker)
+    for (int i = 0; i < nworkers; ++i)
+      if (workers[i].pid) kill(workers[i].pid, SIGUSR2);
   if (statsfile) {
     dumpstats();
   }
@@ -1625,6 +1717,7 @@ ev_usr2_handler(struct ev_loop *loop, ev_signal *w, int revents)
     dumpstats_z();
   }
 
+  if (is_worker) return;
   if (can_reload) {
     do_reload(fork_on_reload, loop);
   }
@@ -1637,6 +1730,10 @@ ev_usr2_handler(struct ev_loop *loop, ev_signal *w, int revents)
 static void
 ev_hup_handler(struct ev_loop *loop, ev_signal *w, int revents)
 {
+  if (is_worker) { reopenlog(); return; }
+  if (nworkers > 1)
+    for (int i = 0; i < nworkers; ++i)
+      if (workers[i].pid) kill(workers[i].pid, SIGHUP);
   if (can_reload) {
     reopenlog();
 
@@ -1655,6 +1752,7 @@ ev_hup_handler(struct ev_loop *loop, ev_signal *w, int revents)
 static void
 ev_term_handler (struct ev_loop *loop, ev_signal *w, int revents)
 {
+  if (is_worker) { worker_shutdown(loop); return; }
   if (fork_on_reload < 0) { /* this is a temp child; dump stats and exit */
     dslog(LOG_INFO, 0, "temp worker received terminating signal %s",
         strsignal(w->signum));
@@ -1696,6 +1794,198 @@ static void setup_signals(struct ev_loop *loop) {
   signal(SIGPIPE, SIG_IGN);	/* in case logfile is FIFO */
 }
 
+/* Workers never reload or own file watchers. Each gets a fresh event loop:
+ * copying an active libev backend would share kernel event state with the
+ * supervisor. The control socket also makes supervisor death observable. */
+static ev_timer worker_drain_timer;
+
+static void worker_drain_timeout(struct ev_loop *loop, ev_timer *w, int revents) {
+  ev_break(loop, EVBREAK_ALL);
+}
+
+static void worker_shutdown(struct ev_loop *loop) {
+  if (worker_draining) return;
+  worker_draining = 1;
+  for (int i = 0; i < numsock; ++i) ev_io_stop(loop, &worker_ios[i]);
+  if (!delayed_heap_len) ev_break(loop, EVBREAK_ALL);
+  else {
+    ev_timer_init(&worker_drain_timer, worker_drain_timeout, 5.0, 0.0);
+    ev_timer_start(loop, &worker_drain_timer);
+  }
+}
+
+static void worker_control(struct ev_loop *loop, ev_io *w, int revents) {
+  char byte;
+  ssize_t n = read(w->fd, &byte, 1);
+  if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) {
+    ev_io_stop(loop, w);
+    worker_shutdown(loop);
+  }
+}
+
+static void run_worker(int slot, int control) {
+  struct ev_loop *loop;
+  ev_io ctl;
+  is_worker = 1;
+  if (worker_ready_fd >= 0) close(worker_ready_fd);
+  can_reload = 0;
+  fork_on_reload = 0;
+  for (int i = 0; i < nworkers; ++i) {
+    if (workers[i].pid) close(workers[i].control);
+    if (retiring[i].pid) close(retiring[i].control);
+    for (int j = 0; j < numsock; ++j)
+      if (i != slot) close(worker_sockets[i][j]);
+  }
+  for (int j = 0; j < numsock; ++j) sock[j] = worker_sockets[slot][j];
+  loop = ev_default_loop(0);
+  /* libev signal lists are process-global and outlive loop destruction.
+   * Unlink inherited watchers before reinitializing the same objects. */
+  ev_child_stop(loop, &worker_reaper);
+  ev_signal_stop(loop, &ev_hup);
+  ev_signal_stop(loop, &ev_usr1);
+  ev_signal_stop(loop, &ev_usr2);
+  ev_signal_stop(loop, &ev_term);
+  ev_signal_stop(loop, &ev_int);
+  ev_default_destroy();
+  loop = ev_default_loop(0);
+  if (!loop) _exit(1);
+  delayed_init(loop);
+  g_cached_time = time(NULL);
+  ev_timer_init(&cached_time_timer, cached_time_cb, 0.0, 1.0);
+  ev_timer_start(loop, &cached_time_timer);
+  setup_signals(loop);
+  worker_ios = calloc(numsock, sizeof(*worker_ios));
+  if (!worker_ios) _exit(1);
+#ifndef NO_STATS
+  stats_time = time(NULL);
+  memset(&gstats, 0, sizeof(gstats));
+  memset(&gptot, 0, sizeof(gptot));
+  for (struct zone *z = zonelist; z; z = z->z_next)
+    memset(&z->z_stats, 0, sizeof(z->z_stats));
+#endif
+  for (int i = 0; i < numsock; ++i) {
+    if (make_socket_nonblocking(sock[i]) < 0) _exit(1);
+    ev_io_init(&worker_ios[i], ev_request_handler, sock[i], EV_READ);
+    ev_io_start(loop, &worker_ios[i]);
+  }
+  ev_io_init(&ctl, worker_control, control, EV_READ);
+  ev_io_start(loop, &ctl);
+  if (write(control, "R", 1) != 1) _exit(1);
+  ev_run(loop, 0);
+  logstats(0);
+  if (flog) fflush(flog);
+  _exit(0);
+}
+
+static int spawn_worker(int slot) {
+  int pair[2];
+  pid_t pid;
+  char ready;
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) return 0;
+  if (flog) fflush(flog);
+  pid = fork();
+  if (pid == 0) {
+    close(pair[0]);
+    run_worker(slot, pair[1]);
+  }
+  close(pair[1]);
+  if (pid < 0) { close(pair[0]); return 0; }
+  /* Startup is bounded even if a child stalls before entering its loop. */
+  struct pollfd pfd = { pair[0], POLLIN, 0 };
+  int r;
+  do r = poll(&pfd, 1, 5000); while (r < 0 && errno == EINTR);
+  if (r <= 0 || read(pair[0], &ready, 1) != 1 || ready != 'R') {
+    close(pair[0]);
+    kill(pid, SIGKILL);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    return 0;
+  }
+  workers[slot].pid = pid;
+  workers[slot].control = pair[0];
+  dslog(LOG_INFO, 0, "worker %d ready (slot %d)", (int)pid, slot);
+  return 1;
+}
+
+static void replace_workers(struct ev_loop *loop) {
+  int i;
+  can_reload = 0;
+  memcpy(retiring, workers, sizeof(workers));
+  memset(workers, 0, sizeof(workers));
+  for (i = 0; i < nworkers; ++i) {
+    if (!spawn_worker(i)) {
+      dslog(LOG_ERR, 0, "unable to start worker generation");
+      for (int j = 0; j < i; ++j) {
+        close(workers[j].control);
+        kill(workers[j].pid, SIGKILL);
+        while (waitpid(workers[j].pid, NULL, 0) < 0 && errno == EINTR) {}
+      }
+      memcpy(workers, retiring, sizeof(workers));
+      memset(retiring, 0, sizeof(retiring));
+      can_reload = 1;
+      if (!workers_started) error(0, "unable to start workers");
+      worker_replace_pending = 1;
+      return;
+    }
+  }
+  worker_replace_pending = 0;
+  workers_started = 1;
+  for (i = 0; i < nworkers; ++i)
+    if (retiring[i].pid) {
+      /* shutdown sends EOF without releasing the descriptor until reaped. */
+      shutdown(retiring[i].control, SHUT_WR);
+      retiring[i].deadline = ev_time() + 6.0;
+    }
+}
+
+static void worker_exited(struct ev_loop *loop, ev_child *w, int revents) {
+  for (int i = 0; i < nworkers; ++i) {
+    struct worker_process *sets[] = { &retiring[i], &workers[i] };
+    for (int j = 0; j < 2; ++j) {
+      struct worker_process *p = sets[j];
+      if (p->pid == w->rpid) {
+        dslog(LOG_INFO, 0, "worker %d exited (status %x)", (int)p->pid, w->rstatus);
+        close(p->control);
+        p->pid = 0;
+      }
+    }
+  }
+}
+
+static void wait_worker_shutdown(pid_t pid, ev_tstamp deadline) {
+  if (!pid) return;
+  for (;;) {
+    pid_t r = waitpid(pid, NULL, WNOHANG);
+    if (r == pid || (r < 0 && errno == ECHILD)) return;
+    if (ev_time() >= deadline) break;
+    struct timespec pause = { 0, 10000000 };
+    nanosleep(&pause, NULL);
+  }
+  kill(pid, SIGKILL);
+  while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+}
+
+static void worker_supervise(struct ev_loop *loop, ev_timer *w, int revents) {
+  int draining = 0;
+  for (int i = 0; i < nworkers; ++i) {
+    if (retiring[i].pid) {
+      draining = 1;
+      if (retiring[i].deadline && ev_time() >= retiring[i].deadline) {
+        kill(retiring[i].pid, SIGKILL);
+        retiring[i].deadline = 0;
+      }
+    }
+    if (!workers[i].pid && worker_image_valid) spawn_worker(i);
+  }
+  can_reload = !draining;
+  if (can_reload && (pending_reload || worker_replace_pending)) {
+    pending_reload = 0;
+    reopenlog();
+    /* A queued signal alone must not rotate an unchanged generation. */
+    if (worker_replace_pending && !nextdataset2reload(NULL)) replace_workers(loop);
+    else do_reload(0, loop);
+  }
+}
+
 /*
  * End of signal handlers
  */
@@ -1733,6 +2023,20 @@ int main(int argc, char **argv) {
     dumpstats_z();
 #endif
 
+  static ev_timer supervisor_timer;
+  if (nworkers > 1) {
+    ev_child_init(&worker_reaper, worker_exited, 0, 0);
+    ev_child_start(loop, &worker_reaper);
+    replace_workers(loop);
+    if (worker_ready_fd >= 0) {
+      write(worker_ready_fd, "", 1);
+      close(worker_ready_fd);
+      worker_ready_fd = -1;
+    }
+    ev_timer_init(&supervisor_timer, worker_supervise, 0.1, 0.1);
+    ev_timer_start(loop, &supervisor_timer);
+  }
+
   io_evs = calloc(numsock, sizeof (ev_io));
 
   if (io_evs == NULL) {
@@ -1742,7 +2046,7 @@ int main(int argc, char **argv) {
   for(int i = 0; i < numsock; ++i) {
     make_socket_nonblocking(sock[i]);
     ev_io_init(&io_evs[i], ev_request_handler, sock[i], EV_READ);
-    ev_io_start(loop, &io_evs[i]);
+    if (nworkers == 1) ev_io_start(loop, &io_evs[i]);
   }
 
   static ev_io update_ev;
@@ -1787,6 +2091,19 @@ int main(int argc, char **argv) {
 
   ev_loop(loop, 0);
 
+  if (nworkers > 1) {
+    ev_tstamp deadline = ev_time() + 6.0;
+    for (int i = 0; i < nworkers; ++i) {
+      if (workers[i].pid) close(workers[i].control);
+      if (retiring[i].pid) close(retiring[i].control);
+    }
+    for (int i = 0; i < nworkers; ++i) {
+      wait_worker_shutdown(workers[i].pid, deadline);
+      wait_worker_shutdown(retiring[i].pid, deadline);
+      for (int j = 0; j < numsock; ++j)
+        if (i) close(worker_sockets[i][j]);
+    }
+  }
   for(int i = 0; i < numsock; ++i) {
     close(sock[i]);
   }

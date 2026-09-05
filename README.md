@@ -16,7 +16,7 @@ TODO:
 
 1. Rate limits using leaky bucket model
 2. Hyperscan based regexp backend
-3. Multiprocessing using SO_REUSEPORT and eBPF filters to optimise UDP flows
+3. eBPF filters to optimise UDP worker flows
 4. Better documentation
 
 The current source tree has been forked from https://github.com/spamhaus/rbldnsd and is now maintained by Vsevolod Stakhov.
@@ -44,3 +44,22 @@ Copyright (C) 2002 Michael Tokarev
   You should have received a copy of the GNU General Public License along
   with this program; if not, write to the Free Software Foundation, Inc.,
   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+### Multiple UDP workers
+
+Use `-W 4` to run four query workers and a stable supervisor. Workers have
+separate `SO_REUSEPORT` sockets and share loaded zone pages through fork/CoW.
+Send SIGHUP to the supervisor to reload: it loads zones while the old workers
+serve queries, forks replacements, and retires the old generation after the
+new workers are ready. File-change reloads use the same path.
+
+The default `-W 1` keeps the existing single-process behavior. Multiple-worker
+mode currently excludes `-U` dynamic updates and `-s` statistics files; SIGUSR1
+reports individual worker counters in the log. Kernel UDP distribution varies
+by platform. See the manual for lifecycle and memory details.
+
+Run the process lifecycle tests with:
+
+```sh
+RBLDNSD=/path/to/built/rbldnsd python3 test/pyunit/test_workers.py
+```
