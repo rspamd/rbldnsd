@@ -1294,3 +1294,14 @@ Samples are approximate across concurrent updates. The daemon never blocks for
 a control client. Normal shutdown removes its socket; stale sockets after crashes
 require manual removal. With a single worker this option uses in-process reloads.
 The legacy per-zone \fB-s\fR output remains single-process only.
+
+.SH COMPILED DOMAIN SNAPSHOTS
+The
+.B -B file
+option compiles exactly one dnhash dataset to a versioned binary snapshot and
+exits. Use the dataset type
+.B dnsnapshot
+with that file to serve it through a read-only memory mapping. A snapshot
+preserves domain answers, exclusions, wildcards, entry parameters, substitutions,
+and zone metadata. Publish new snapshots by atomic rename and reload; never
+modify a mapped file in place. See README.snapshot.md for limits and format.

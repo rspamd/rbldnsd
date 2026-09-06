@@ -107,3 +107,4 @@ is still incompatible with `-W` greater than one; use JSON accounting instead.
 acceptance, not completion: poll status to observe the resulting generation or
 reload failure. Commands and responses never wait for a client to become writable;
 if a client loses a reply, it must inspect status before retrying a mutation.
+Compiled read-only domain datasets: see [README.snapshot.md](README.snapshot.md).

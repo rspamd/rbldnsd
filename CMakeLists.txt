@@ -81,6 +81,7 @@ add_executable(rbldnsd
         rbldnsd_acl.c
         rbldnsd_aclkey.c
         rbldnsd_combined.c
+        rbldnsd_snapshot.c
         rbldnsd_dnhash.c
         rbldnsd_dnset.c
         rbldnsd_entryparams.c

@@ -26,6 +26,7 @@
 #include "ev.h"
 #include "rbldnsd.h"
 #include "rbldnsd_control.h"
+#include "rbldnsd_snapshot.h"
 #include "sds/sds.h"
 
 
@@ -159,6 +160,7 @@ hook_query_result_t hook_query_result;
 #endif
 
 /* a list of zonetypes. */
+int rbldnsd_snapshot_compiling;
 const struct dstype *ds_types[] = {
   dstype(ip4set),
   dstype(ip4tset),
@@ -167,6 +169,7 @@ const struct dstype *ds_types[] = {
   dstype(ip6trie),
   dstype(dnset),
   dstype(dnhash),
+  dstype(dnsnapshot),
   dstype(combined),
   dstype(generic),
   dstype(acl),
@@ -231,6 +234,7 @@ static void NORETURN usage(int exitcode) {
 " -x extension - load given extension module (.so file)\n"
 " -X extarg - pass extarg to extension init routine\n"
 #endif
+" -B file - compile one dnhash dataset to an atomic dnsnapshot file\n"
 " -d - dump all zones in BIND format to standard output and exit\n"
 "each zone specified using `name:type:file,file...'\n"
 "syntax, repeated names constitute the same zone.\n"
@@ -576,6 +580,7 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
   int nba = 0;
   uid_t uid = 0;
   gid_t gid = 0;
+  const char *compile_output = NULL;
   int nodaemon = 0, quickstart = 0, dump = 0, nover = 0, forkon = 0, dry_run = 0;
 #ifdef NO_IPv6
   int family = AF_INET;
@@ -596,7 +601,7 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
 
   if (argc <= 1) usage(1);
 
-  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:")) != EOF)
+  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:")) != EOF)
     switch(c) {
     case 'M': control_path = optarg; break;
     case 'W': {
@@ -693,6 +698,7 @@ break;
 #endif
       break;
     case 'q': quickstart = 1; break;
+    case 'B': compile_output = optarg; rbldnsd_snapshot_compiling = 1; break;
     case 'd':
       dump = 1;
       break;
@@ -720,7 +726,7 @@ break;
     error(0, "no zone(s) to service specified (-h for help)");
   argv += optind;
 
-  if (dump || dry_run) {
+  if (dump || dry_run || compile_output) {
     time_t now;
     logto = LOGTO_STDERR;
     for(c = 0; c < argc; ++c)
@@ -733,6 +739,14 @@ break;
     if (!do_reload(0, loop))
       error(0, "zone loading errors, aborting");
 
+    if (compile_output) {
+      struct dataset *ds = nextdataset(NULL);
+      if (!ds || nextdataset(ds) || !isdstype(ds->ds_type, dnhash))
+        error(0, "-B requires exactly one dnhash dataset");
+      if (!rbldnsd_snapshot_write(ds, compile_output))
+        error(errno, "cannot compile snapshot (unsupported metadata or output error)");
+      exit(0);
+    }
     if (dump) {
       now = time(NULL);
       printf("; zone dump made %s", ctime(&now));

@@ -240,6 +240,7 @@ declaredstype(ip6tset);
 declaredstype(ip6trie);
 declaredstype(dnset);
 declaredstype(dnhash);
+declaredstype(dnsnapshot);
 declaredstype(generic);
 declaredstype(combined);
 declaredstype(acl);
