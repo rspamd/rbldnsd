@@ -100,9 +100,17 @@ param :7:params $ @ require_key=1
         before = self.query(port, 'listed')
         if pathlib.Path('/proc').exists():
             maps = pathlib.Path('/proc', str(proc.pid), 'maps').read_text().splitlines()
-            mappings = [x for x in maps if str(self.snap) in x]
-            self.assertTrue(mappings)
-            self.assertTrue(all(x.split()[1] == 'r--p' for x in mappings), mappings)
+            # The stable controller keeps metadata only. Immutable mappings
+            # belong to the generation owner and its query workers.
+            self.assertFalse([x for x in maps if str(self.snap) in x])
+            from test_workers import children
+            workers = children(proc.pid)
+            self.assertEqual(len(workers), 3)
+            for pid in workers:
+                maps = pathlib.Path('/proc', str(pid), 'maps').read_text().splitlines()
+                mappings = [x for x in maps if str(self.snap) in x]
+                self.assertTrue(mappings)
+                self.assertTrue(all(x.split()[1] == 'r--p' for x in mappings), mappings)
         self.source.write_text('listed :8:NEW\n')
         self.compile()
         # Atomic replacement leaves old mapping live until explicit reload.
