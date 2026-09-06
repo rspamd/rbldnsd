@@ -270,6 +270,7 @@ static int generation_exited(pid_t pid) {
     close(g->fd);
     free(g->message);
     g->message = NULL;
+    rbldnsd_control_release_generation((unsigned)g->id);
     g->guardian = 0;
     /* Keep the generation occupied until its inherited liveness pipe closes. */
     if (i == 0) rbldnsd_control_reload(0);
@@ -296,7 +297,7 @@ static void generation_collect(void) {
     char ignored;
     if (read(g->life, &ignored, 1) != 0) continue;
     close(g->life);
-    rbldnsd_control_release_generation((unsigned)g->id);
+    rbldnsd_control_release_generation_dead((unsigned)g->id);
     memset(g, 0, sizeof(*g));
   }
 }

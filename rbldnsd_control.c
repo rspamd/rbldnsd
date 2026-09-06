@@ -12,12 +12,13 @@
 #include <stdarg.h>
 #include <string.h>
 #include <time.h>
+#include <signal.h>
 #include <inttypes.h>
 
 #define SLOTS 257
-#define LOAD(p) __atomic_load_n((p), __ATOMIC_RELAXED)
+#define LOAD(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
 #define ADD(p,n) __atomic_fetch_add((p),(n),__ATOMIC_RELAXED)
-#define SET(p,n) __atomic_store_n((p),(n),__ATOMIC_RELAXED)
+#define SET(p,n) __atomic_store_n((p),(n),__ATOMIC_RELEASE)
 struct counts { uint64_t queries, in, replies, out, noerror, nxdomain, other,
   unanswered, send_errors, receive_drops, rate_limited; };
 struct slot { struct counts c, baseline; uint64_t backlog, backlog_bytes;
@@ -25,12 +26,32 @@ struct slot { struct counts c, baseline; uint64_t backlog, backlog_bytes;
 static struct shared { struct slot slots[SLOTS];
   unsigned generation, receive_accounting, send_accounting; int reload_result; time_t reload_time; } *shared;
 static int current = -1, fd = -1;
+static pid_t controller;
 static ev_io watcher;
 static void (*action)(int);
 static int (*extension)(const char *,char *,size_t);
 static char bound_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static dev_t bound_dev;
 static ino_t bound_ino;
+
+/* Quarantine is distinct from draining: a quarantined worker may still write,
+ * but it must never make its slot available to another process. PID reuse can
+ * delay reclamation, which is conservative and preferable to shared writers. */
+static void reclaim_quarantined(void) {
+  if(!shared || getpid()!=controller) return;
+  for(int i=0;i<SLOTS;++i) {
+    struct slot *s=&shared->slots[i];
+    if(LOAD(&s->state)!=5) continue;
+    pid_t pid=LOAD(&s->pid);
+    /* An unpublished child could still start: only all-writers-dead proof
+     * can reclaim a PID-zero slot. */
+    if(pid>0 && kill(pid,0)<0 && errno==ESRCH) {
+      unsigned quarantined=5;
+      __atomic_compare_exchange_n(&s->state,&quarantined,0,0,
+        __ATOMIC_RELEASE,__ATOMIC_RELAXED);
+    }
+  }
+}
 
 static void collect(struct counts *to, const struct counts *from) {
 #define C(n) to->n += LOAD(&from->n)
@@ -62,6 +83,7 @@ static void receive_command(struct ev_loop *loop, ev_io *w, int events) {
   msg.msg_iov = &iov; msg.msg_iovlen = 1;
   ssize_t n = recvmsg(fd, &msg, 0);
   if (n < 0) return;
+  reclaim_quarantined();
   size_t left = sizeof(response);
   int operation = 0;
   if (n >= (ssize_t)sizeof(command) || (msg.msg_flags & MSG_TRUNC)) n = 0;
@@ -91,7 +113,7 @@ static void receive_command(struct ev_loop *loop, ev_io *w, int events) {
     int comma=0, next=-1;
     for(int i=(int)first;i<SLOTS;++i) {
       struct slot *s=&shared->slots[i];
-      if(!LOAD(&s->state) || LOAD(&s->state)==4) continue;
+      if(!LOAD(&s->state) || LOAD(&s->state)>=4) continue;
       if(comma==8) { next=i; break; }
       struct counts base={0}, c={0}; collect(&base,&s->baseline); collect(&c,&s->c);
 #define C(n) c.n -= base.n
@@ -145,12 +167,14 @@ int rbldnsd_control_init(struct ev_loop *loop,const char *path,void (*cb)(int)) 
   if(lstat(path,&st)<0) return -1;
   bound_dev=st.st_dev; bound_ino=st.st_ino;
   shared->reload_result=1; shared->reload_time=time(NULL);
+  controller=getpid();
   action=cb;
   ev_io_init(&watcher,receive_command,fd,EV_READ); ev_io_start(loop,&watcher);
   return 0;
 }
 int rbldnsd_control_slot_alloc(unsigned generation) {
   if(!shared) return -1;
+  reclaim_quarantined();
   for(int i=0;i<SLOTS;++i) {
     unsigned empty=0;
     if(!__atomic_compare_exchange_n(&shared->slots[i].state,&empty,4,0,
@@ -158,6 +182,7 @@ int rbldnsd_control_slot_alloc(unsigned generation) {
     shared->slots[i].baseline=shared->slots[i].c;
     shared->slots[i].backlog=shared->slots[i].backlog_bytes=0;
     shared->slots[i].pid=0;
+
     shared->slots[i].generation=generation;
     SET(&shared->slots[i].state,1); return i;
   }
@@ -166,9 +191,16 @@ int rbldnsd_control_slot_alloc(unsigned generation) {
 void rbldnsd_control_child(void) {
   if(fd>=0) { ev_io_stop(ev_default_loop(0),&watcher); close(fd); fd=-1; }
 }
-void rbldnsd_control_worker(int slot) {
+int rbldnsd_control_worker(int slot) {
+  current=-1;
+  if(!shared) return 1;
+  if(slot<0 || slot>=SLOTS) return 0;
+  SET(&shared->slots[slot].pid,getpid());
+  unsigned starting=1;
+  if(!__atomic_compare_exchange_n(&shared->slots[slot].state,&starting,2,0,
+       __ATOMIC_ACQ_REL,__ATOMIC_RELAXED)) return 0;
   current=slot;
-  if(shared && slot>=0) { SET(&shared->slots[slot].pid,getpid()); SET(&shared->slots[slot].state,2); }
+  return 1;
 }
 void rbldnsd_control_release(int slot) {
   if(shared && slot>=0 && shared->slots[slot].state) {
@@ -176,12 +208,33 @@ void rbldnsd_control_release(int slot) {
   }
 }
 void rbldnsd_control_release_generation(unsigned g) {
-  if(shared) for(int i=0;i<SLOTS;++i)
-    if(shared->slots[i].generation==g) rbldnsd_control_release(i);
+  if(!shared || getpid()!=controller) return;
+  for(int i=0;i<SLOTS;++i) {
+    unsigned state=LOAD(&shared->slots[i].state);
+    /* State 4 is a new reservation whose generation is not published yet.
+     * Its stale generation field cannot identify it. Never reclaim it here. */
+    if(state && state!=4 && shared->slots[i].generation==g) {
+      while(state && state!=4 && state!=5 && !__atomic_compare_exchange_n(
+        &shared->slots[i].state,&state,5,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED)) {}
+    }
+  }
+  reclaim_quarantined();
+}
+void rbldnsd_control_release_generation_dead(unsigned g) {
+  if(!shared || getpid()!=controller) return;
+  for(int i=0;i<SLOTS;++i) {
+    unsigned state=LOAD(&shared->slots[i].state);
+    if(state && state!=4 && shared->slots[i].generation==g)
+      rbldnsd_control_release(i);
+  }
 }
 void rbldnsd_control_generation(unsigned g) { if(shared) shared->generation=g; }
 void rbldnsd_control_reload(int r) { if(shared) {shared->reload_result=r;shared->reload_time=time(NULL);} }
-void rbldnsd_control_draining(void) { if(shared && current>=0) SET(&shared->slots[current].state,3); }
+void rbldnsd_control_draining(void) { if(shared && current>=0) {
+  unsigned running=2;
+  __atomic_compare_exchange_n(&shared->slots[current].state,&running,3,0,
+    __ATOMIC_RELEASE,__ATOMIC_RELAXED);
+} }
 void rbldnsd_control_query(unsigned b,int r,unsigned rc) {
   if(!shared || current<0) return;
   struct counts *c=&shared->slots[current].c;

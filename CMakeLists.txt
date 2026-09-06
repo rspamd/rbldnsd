@@ -113,3 +113,7 @@ add_custom_command(
 
 
 install(TARGETS rbldnsd RUNTIME DESTINATION sbin)
+# Small process-level regression for fork-shared accounting, built alongside
+# the daemon so the Python suite can execute it without compiler discovery.
+add_executable(test_control_slots test/control_slots.c rbldnsd_control.c)
+target_link_libraries(test_control_slots ${RSPAMD_REQUIRED_LIBRARIES} ${CMAKE_REQUIRED_LIBRARIES})

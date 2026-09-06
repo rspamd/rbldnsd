@@ -1908,7 +1908,7 @@ static void run_worker(int slot, int control, int metrics) {
   ev_io ctl;
   is_worker = 1;
   rbldnsd_control_child();
-  rbldnsd_control_worker(metrics);
+  if (!rbldnsd_control_worker(metrics)) _exit(1);
   if (generation_control >= 0) close(generation_control);
   if (worker_ready_fd >= 0) close(worker_ready_fd);
   can_reload = 0;
@@ -2151,7 +2151,9 @@ int main(int argc, char **argv) {
         receive_accounting = 0;
   rbldnsd_control_transport_support(receive_accounting, 1);
   if (nworkers == 1) {
-    rbldnsd_control_worker(rbldnsd_control_slot_alloc(1));
+    int metrics=rbldnsd_control_slot_alloc(1);
+    if(!rbldnsd_control_worker(metrics))
+      error(0,"cannot allocate control accounting slot");
     rbldnsd_control_generation(control_generation = 1);
   }
 
