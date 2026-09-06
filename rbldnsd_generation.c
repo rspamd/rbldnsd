@@ -307,6 +307,9 @@ static void generation_supervise(struct ev_loop *loop, ev_timer *w, int revents)
   struct generation_process *g = &generation_candidate;
   if (g->guardian) {
     if (ev_time() >= g->deadline) {
+      /* Terminal state: an activation ACK can already be buffered. Never
+       * promote it after signalling termination, even before SIGCHLD runs. */
+      g->state = -1;
       dslog(LOG_WARNING, 0, "candidate deadline exceeded; retaining active generation");
       (void)write(g->fd, "Q", 1);
       if (g->owner) kill(-g->owner, SIGKILL);
