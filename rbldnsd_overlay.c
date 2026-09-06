@@ -204,6 +204,14 @@ int rbldnsd_overlay_init(struct ev_loop *loop,unsigned limit,void (*action)(int)
   if(shared==MAP_FAILED) { shared=NULL; return -1; }
   event_loop=loop; control_action=action; controller_pid=getpid(); rbldnsd_control_extension(command); return 0;
 }
+void rbldnsd_overlay_child(void) {
+  if(getpid()==controller_pid) return;
+  /* libev's child watchers participate in a process-global SIGCHLD list;
+   * detach this inherited watcher while its original loop is still valid. */
+  if(event_loop && ev_is_active(&exporter)) ev_child_stop(event_loop,&exporter);
+  export_pid=0;
+  event_loop=NULL;
+}
 void rbldnsd_overlay_close(void) {
   if(getpid()!=controller_pid) return;
   if(export_pid) { kill(export_pid,SIGKILL); while(waitpid(export_pid,NULL,0)<0 && errno==EINTR) {} export_pid=0; }

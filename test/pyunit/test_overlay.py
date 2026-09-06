@@ -134,6 +134,50 @@ class Overlay(test_snapshot.Snapshot):
         for name in ['listed', 'a.wild', 'b.wild', 'newer', 'cycle0', 'cycle5']:
             self.assertEqual(self.query(port, name), self.query(restarted_port, name))
 
+    def test_reload_while_exporter_is_blocked(self):
+        _, port = self.start_overlay('dnhash')
+        self.command('overlay-put 0 fresh 127.0.0.2 shared')
+        original = self.source.read_bytes()
+        self.source.unlink()
+        os.mkfifo(self.source)
+        saved = self.root / 'blocked-export'
+        self.assertTrue(self.command('overlay-compact 1 ' + str(saved))['accepted'])
+        writer = None
+        try:
+            # A nonblocking FIFO writer opens only once the export child has
+            # opened the reader. Keep it open without data to stall parsing.
+            for _ in range(200):
+                try:
+                    writer = os.open(self.source, os.O_WRONLY | os.O_NONBLOCK)
+                    break
+                except OSError as exc:
+                    import errno
+                    if exc.errno != errno.ENXIO:
+                        raise
+                    time.sleep(.01)
+            self.assertIsNotNone(writer, 'exporter did not open FIFO')
+            self.assertEqual(self.command('overlay-status')['export_state'], 'running')
+            replacement = self.root / 'replacement'
+            replacement.write_bytes(original.replace(b'listed :3:listed $ $1',
+                                                     b'listed :3:reload-listed'))
+            os.replace(replacement, self.source)
+            previous = self.command('status')['generation']
+            self.command('reload')
+            self.wait(lambda: self.command('status')['generation'] > previous)
+            for _ in range(20):
+                self.assertIn(b'reload-listed', self.query(port, 'listed'))
+                self.assertIn(b'shared', self.query(port, 'fresh'))
+            os.write(writer, original)
+            os.close(writer)
+            writer = None
+            self.wait(lambda: self.command('overlay-status')['export_state'] == 'success')
+            _, export_port = self.start('dnsnapshot', saved)
+            self.assertIn(b'listed listed suffix', self.query(export_port, 'listed'))
+            self.assertIn(b'shared', self.query(export_port, 'fresh'))
+        finally:
+            if writer is not None:
+                os.close(writer)
+
     def test_dnhash_updates_export(self):
         _, port = self.start_overlay('dnhash')
         self.command('overlay-put 0 fresh 127.0.0.2 fresh')
