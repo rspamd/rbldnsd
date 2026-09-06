@@ -119,6 +119,7 @@ static void generation_owner(int fd) {
 
 static void generation_guardian(int fd) {
   rbldnsd_control_child();
+  rbldnsd_overlay_child();
   int pair[2];
   /* Do not retain another generation's liveness channel. */
   struct generation_process *sets[] = { &generation_active, &generation_retiring };

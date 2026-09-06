@@ -1908,6 +1908,7 @@ static void run_worker(int slot, int control, int metrics) {
   ev_io ctl;
   is_worker = 1;
   rbldnsd_control_child();
+  rbldnsd_overlay_child();
   if (!rbldnsd_control_worker(metrics)) _exit(1);
   if (generation_control >= 0) close(generation_control);
   if (worker_ready_fd >= 0) close(worker_ready_fd);
