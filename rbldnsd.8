@@ -248,28 +248,37 @@ behaviour.
 
 .IP \fB\-W\ count\fR
 Run the specified number of UDP query workers (1 to 128; default 1).
-With two or more workers, a supervisor owns the zone data and each worker
-uses a separate SO_REUSEPORT socket for each listening address. All
-sockets are bound before dropping privileges. The operating system
+With two or more workers, a stable controller supervises generation owners.
+Each worker uses a separate SO_REUSEPORT socket for each listening address.
+All sockets are bound before dropping privileges. The operating system
 controls distribution of datagrams among sockets.
-Workers inherit the loaded zones using copy-on-write. On SIGHUP or an
-automatic file reload, the supervisor loads the data while old workers
-continue answering, forks a new generation, and retires the old generation
-only after every new worker reports ready. A failed zone load keeps the old
-workers. During transition, replies can come from either generation.
-Delayed replies drain for up to five seconds before a worker exits.
-The supervisor forcibly terminates unresponsive retiring workers after
-six seconds.
-The supervisor PID remains stable; send service signals to that PID.
-Workers are restarted if they exit unexpectedly, provided the supervisor
-has a successfully loaded zone image. After a failed load, replacement
-forks wait for a successful reload. Workers also exit when the supervisor
-disappears.
+On SIGHUP or an automatic file reload, a candidate owner loads every input
+file in isolation while the active generation continues answering. It forks
+workers sharing the new image through copy-on-write; the controller activates
+them only after all workers report ready. A failed load, loader crash, or
+candidate timeout retains the complete previous generation. Unchanged input
+files do not rotate workers. During transition replies may come from either
+generation. Delayed replies drain for up to five seconds before a worker exits.
+Each owner retains its immutable image and restarts crashed workers even
+when a subsequent candidate fails to load. The controller retains only
+configuration and input metadata, allowing old zone allocations to be fully
+reclaimed when their generation exits. Full reloads also discard excess
+capacity from previously larger zones.
+The controller PID remains stable; send service signals to that PID.
+A guardian for each generation bounds cleanup to six seconds when its owner
+or controller disappears, including a loader blocked in file I/O.
 This mode requires SO_REUSEPORT and IP UDP listening addresses; it cannot
 be combined with dynamic updates (\fB\-U\fR) or a statistics file
 (\fB\-s\fR). SIGUSR1 logs individual worker statistics. The \fB\-f\fR
 option is redundant in this mode. Reloading temporarily retains both old
 and new zone images, and per-worker writes may consume additional memory.
+
+.IP \fB\-T\ seconds\fR
+Set the total deadline for loading and initializing a candidate worker
+generation (1 to 86400 seconds; default 60). Requires multiworker mode to
+have any effect. A timed-out candidate is discarded while the active
+generation continues serving. No record-count or shrink limit is imposed;
+valid empty input files remain supported.
 
 .IP \fB\-f\fR
 Request \fBrbldnsd\fR to continue processing requests during data reloads.

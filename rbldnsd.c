@@ -135,8 +135,14 @@ static int can_reload; /* block reload when another reload is there */
 static int pending_reload = 0;
 #define MAXWORKERS 128
 static char *control_path;
-static unsigned control_generation, control_next_generation;
+static unsigned control_generation;
 static int nworkers = 1, is_worker, worker_draining;
+static int is_generation, generation_control = -1, generation_activated;
+static unsigned generation_timeout = 60;
+static unsigned long generation_id;
+static int generation_start(struct ev_loop *loop);
+static void generation_signal(char command);
+static int generation_exited(pid_t pid);
 static int worker_sockets[MAXWORKERS][MAXSOCK];
 static ev_io *worker_ios;
 static ev_child worker_reaper;
@@ -211,6 +217,7 @@ static void NORETURN usage(int exitcode) {
 " -n - do not become a daemon\n"
 " -M path - owner-only Unix datagram control socket (JSON replies)\n"
 " -W count - run 1..128 UDP workers with SO_REUSEPORT (default: 1)\n"
+" -T seconds - multiworker candidate load/start deadline (default: 60)\n"
 " -f - fork a child process while reloading zones, to process requests\n"
 "  during reload (may double memory requiriments)\n"
 " -q - quickstart, load zones after backgrounding\n"
@@ -601,9 +608,17 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
 
   if (argc <= 1) usage(1);
 
-  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:")) != EOF)
+  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:T:")) != EOF)
     switch(c) {
     case 'M': control_path = optarg; break;
+    case 'T': {
+      char *end;
+      unsigned long seconds = strtoul(optarg, &end, 10);
+      if (!*optarg || *end || seconds < 1 || seconds > 86400)
+        error(0, "invalid generation timeout (expected 1..86400 seconds)");
+      generation_timeout = seconds;
+      break;
+    }
     case 'W': {
       char *end;
       long count = strtol(optarg, &end, 10);
@@ -919,7 +934,7 @@ break;
     error(0, "unable to iniitialize extension `%s'", ext);
 #endif
 
-  if (!quickstart && !do_reload(0, loop))
+  if (nworkers == 1 && !quickstart && !do_reload(0, loop))
     error(0, "zone loading errors, aborting");
 
   /* count number of zones */
@@ -950,7 +965,7 @@ break;
     logto = LOGTO_SYSLOG;
   }
 
-  if (quickstart)
+  if (quickstart && nworkers == 1)
     do_reload(0, loop);
 
   /* only set "main" fork_on_reload after first reload */
@@ -1189,16 +1204,18 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 #endif
 #endif /* NO_TIMES */
 
+  if (nworkers > 1 && workers_started && !is_generation)
+    return generation_start(loop);
   pending_reload = 0;
   ds = nextdataset2reload(NULL);
   if (!ds && call_hook(reload_check, (zonelist)) == 0) {
     check_expires();
-    rbldnsd_control_reload(1);
+    if (nworkers == 1) rbldnsd_control_reload(1);
     return 1;	/* nothing to reload */
   }
 
   if (nworkers > 1 || control_path) do_fork = 0;
-  rbldnsd_control_reload(-1);
+  if (nworkers == 1) rbldnsd_control_reload(-1);
 
   if (do_fork) {
     int pfd[2];
@@ -1333,20 +1350,9 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
     }
   }
 
-  rbldnsd_control_reload(r);
-  if (r && nworkers == 1 && control_path) rbldnsd_control_generation(++control_generation);
-  if (nworkers > 1 && workers_started) {
-    worker_image_valid = r;
-    if (r) replace_workers(loop);
-    else {
-      /* A failed load may have changed part of the owner's image. Never
-       * fork it; force every dataset to be reconsidered on the next try. */
-      struct dataset *retry = NULL;
-      while ((retry = nextdataset(retry)) != NULL)
-        for (struct dsfile *f = retry->ds_dsf; f; f = f->dsf_next)
-          f->dsf_stamp = 0;
-      dslog(LOG_WARNING, 0, "reload failed; keeping old workers");
-    }
+  if (nworkers == 1) {
+    rbldnsd_control_reload(r);
+    if (r && control_path) rbldnsd_control_generation(++control_generation);
   }
   return r;
 }
@@ -1717,6 +1723,7 @@ ev_update_handler(struct ev_loop *loop, ev_io *w, int revents)
 static void
 ev_usr1_handler (struct ev_loop *loop, ev_signal *w, int revents)
 {
+  if (nworkers > 1 && !is_worker && !is_generation) generation_signal('1');
   if (nworkers > 1 && !is_worker)
     for (int i = 0; i < nworkers; ++i)
       if (workers[i].pid) kill(workers[i].pid, SIGUSR1);
@@ -1730,6 +1737,7 @@ ev_usr1_handler (struct ev_loop *loop, ev_signal *w, int revents)
 static void
 ev_usr2_handler(struct ev_loop *loop, ev_signal *w, int revents)
 {
+  if (nworkers > 1 && !is_worker && !is_generation) generation_signal('2');
   if (nworkers > 1 && !is_worker)
     for (int i = 0; i < nworkers; ++i)
       if (workers[i].pid) kill(workers[i].pid, SIGUSR2);
@@ -1743,7 +1751,7 @@ ev_usr2_handler(struct ev_loop *loop, ev_signal *w, int revents)
     dumpstats_z();
   }
 
-  if (is_worker) return;
+  if (is_worker || is_generation) return;
   if (can_reload) {
     do_reload(fork_on_reload, loop);
   }
@@ -1757,9 +1765,11 @@ static void
 ev_hup_handler(struct ev_loop *loop, ev_signal *w, int revents)
 {
   if (is_worker) { reopenlog(); return; }
+  if (!is_generation && nworkers > 1) generation_signal('H');
   if (nworkers > 1)
     for (int i = 0; i < nworkers; ++i)
       if (workers[i].pid) kill(workers[i].pid, SIGHUP);
+  if (is_generation) { reopenlog(); return; }
   if (can_reload) {
     reopenlog();
 
@@ -1856,6 +1866,7 @@ static void run_worker(int slot, int control, int metrics) {
   is_worker = 1;
   rbldnsd_control_child();
   rbldnsd_control_worker(metrics);
+  if (generation_control >= 0) close(generation_control);
   if (worker_ready_fd >= 0) close(worker_ready_fd);
   can_reload = 0;
   fork_on_reload = 0;
@@ -1900,6 +1911,10 @@ static void run_worker(int slot, int control, int metrics) {
   ev_io_init(&ctl, worker_control, control, EV_READ);
   ev_io_start(loop, &ctl);
   if (write(control, "R", 1) != 1) _exit(1);
+  if (is_generation) {
+    char activate;
+    if (read(control, &activate, 1) != 1 || activate != 'A') _exit(1);
+  }
   ev_run(loop, 0);
   logstats(0);
   if (flog) fflush(flog);
@@ -1912,7 +1927,7 @@ static int spawn_worker(int slot) {
   char ready;
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) return 0;
   if (flog) fflush(flog);
-  int metrics = rbldnsd_control_slot_alloc(control_next_generation ? control_next_generation : control_generation);
+  int metrics = rbldnsd_control_slot_alloc((unsigned)generation_id);
   pid = fork();
   if (pid == 0) {
     close(pair[0]);
@@ -1932,6 +1947,12 @@ static int spawn_worker(int slot) {
     return 0;
   }
   workers[slot].metrics = metrics;
+  if (is_generation && generation_activated && write(pair[0], "A", 1) != 1) {
+    close(pair[0]); kill(pid, SIGKILL);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    rbldnsd_control_release(metrics);
+    return 0;
+  }
   workers[slot].pid = pid;
   workers[slot].control = pair[0];
   dslog(LOG_INFO, 0, "worker %d ready (slot %d)", (int)pid, slot);
@@ -1941,7 +1962,6 @@ static int spawn_worker(int slot) {
 static void replace_workers(struct ev_loop *loop) {
   int i;
   can_reload = 0;
-  control_next_generation = control_generation + 1;
   memcpy(retiring, workers, sizeof(workers));
   memset(workers, 0, sizeof(workers));
   for (i = 0; i < nworkers; ++i) {
@@ -1957,15 +1977,12 @@ static void replace_workers(struct ev_loop *loop) {
       memset(retiring, 0, sizeof(retiring));
       can_reload = 1;
       if (!workers_started) error(0, "unable to start workers");
-      control_next_generation = 0;
       worker_replace_pending = 1;
       return;
     }
   }
   worker_replace_pending = 0;
   workers_started = 1;
-  rbldnsd_control_generation(++control_generation);
-  control_next_generation = 0;
   for (i = 0; i < nworkers; ++i)
     if (retiring[i].pid) {
       /* shutdown sends EOF without releasing the descriptor until reaped. */
@@ -1975,6 +1992,7 @@ static void replace_workers(struct ev_loop *loop) {
 }
 
 static void worker_exited(struct ev_loop *loop, ev_child *w, int revents) {
+  if (!is_generation && generation_exited(w->rpid)) return;
   for (int i = 0; i < nworkers; ++i) {
     struct worker_process *sets[] = { &retiring[i], &workers[i] };
     for (int j = 0; j < 2; ++j) {
@@ -2014,6 +2032,7 @@ static void worker_supervise(struct ev_loop *loop, ev_timer *w, int revents) {
     }
     if (!workers[i].pid && worker_image_valid) spawn_worker(i);
   }
+  if (is_generation) return;
   can_reload = !draining;
   if (can_reload && (pending_reload || worker_replace_pending)) {
     pending_reload = 0;
@@ -2023,6 +2042,8 @@ static void worker_supervise(struct ev_loop *loop, ev_timer *w, int revents) {
     else do_reload(0, loop);
   }
 }
+
+#include "rbldnsd_generation.c"
 
 /*
  * End of signal handlers
@@ -2077,13 +2098,9 @@ int main(int argc, char **argv) {
   if (nworkers > 1) {
     ev_child_init(&worker_reaper, worker_exited, 0, 0);
     ev_child_start(loop, &worker_reaper);
-    replace_workers(loop);
-    if (worker_ready_fd >= 0) {
-      write(worker_ready_fd, "", 1);
-      close(worker_ready_fd);
-      worker_ready_fd = -1;
-    }
-    ev_timer_init(&supervisor_timer, worker_supervise, 0.1, 0.1);
+    if (!generation_start(loop)) error(errno, "unable to start generation");
+    workers_started = 1;
+    ev_timer_init(&supervisor_timer, generation_supervise, 0.02, 0.02);
     ev_timer_start(loop, &supervisor_timer);
   }
 
@@ -2141,19 +2158,7 @@ int main(int argc, char **argv) {
 
   ev_loop(loop, 0);
 
-  if (nworkers > 1) {
-    ev_tstamp deadline = ev_time() + 6.0;
-    for (int i = 0; i < nworkers; ++i) {
-      if (workers[i].pid) close(workers[i].control);
-      if (retiring[i].pid) close(retiring[i].control);
-    }
-    for (int i = 0; i < nworkers; ++i) {
-      wait_worker_shutdown(workers[i].pid, deadline);
-      wait_worker_shutdown(retiring[i].pid, deadline);
-      for (int j = 0; j < numsock; ++j)
-        if (i) close(worker_sockets[i][j]);
-    }
-  }
+  if (nworkers > 1) generation_shutdown();
   for(int i = 0; i < numsock; ++i) {
     close(sock[i]);
   }
@@ -2166,7 +2171,7 @@ int main(int argc, char **argv) {
   free(io_evs);
   free(stat_evs);
 
-  return 0;
+  return generation_startup_failed ? 1 : 0;
 }
 
 void oom(void) {

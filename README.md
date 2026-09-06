@@ -49,9 +49,20 @@ Copyright (C) 2002 Michael Tokarev
 
 Use `-W 4` to run four query workers and a stable supervisor. Workers have
 separate `SO_REUSEPORT` sockets and share loaded zone pages through fork/CoW.
-Send SIGHUP to the supervisor to reload: it loads zones while the old workers
-serve queries, forks replacements, and retires the old generation after the
-new workers are ready. File-change reloads use the same path.
+Send SIGHUP to the supervisor to reload. An isolated candidate process loads
+all input files, then forks replacements sharing its new image. The controller
+activates the complete generation and retires the previous one only after every
+worker is ready. File-change reloads use the same path; unchanged files do not
+rotate workers.
+
+Each generation keeps an immutable owner process that can replace crashed
+workers even after a failed reload. A small guardian observes controller death
+and bounds cleanup of blocked loaders and stopped workers. The controller
+keeps configuration and file metadata, not zone contents, so retired images
+are reclaimed completely. Reload memory is approximately the old image plus
+the new image, without inherited hash-table capacity from larger old zones.
+`-T seconds` bounds candidate loading and worker startup (default 60 seconds).
+A failed, crashed, or timed-out candidate leaves the active generation intact.
 
 The default `-W 1` keeps the existing single-process behavior. Multiple-worker
 mode currently excludes `-U` dynamic updates and `-s` statistics files; SIGUSR1
