@@ -8,7 +8,7 @@ struct generation_stamp { time_t stamp; off_t size; };
 struct generation_zone { time_t stamp, expires; };
 struct generation_process {
   pid_t guardian, owner;
-  int fd, state;
+  int fd, life, state;
   unsigned long id;
   ev_tstamp deadline;
   unsigned char *message;
@@ -118,7 +118,10 @@ static void generation_guardian(int fd) {
   /* Do not retain another generation's liveness channel. */
   struct generation_process *sets[] = { &generation_active, &generation_retiring };
   for (unsigned i = 0; i < 2; ++i)
-    if (sets[i]->guardian) close(sets[i]->fd);
+    if (sets[i]->id) {
+      if (sets[i]->guardian) close(sets[i]->fd);
+      close(sets[i]->life);
+    }
   if (worker_ready_fd >= 0) close(worker_ready_fd);
   signal(SIGCHLD, SIG_DFL);
   signal(SIGTERM, SIG_DFL);
@@ -201,7 +204,8 @@ static void generation_signal(char command) {
 }
 
 static int generation_start(struct ev_loop *loop) {
-  if (generation_candidate.guardian || generation_retiring.guardian) {
+  if (generation_candidate.id || generation_retiring.id ||
+      (generation_active.id && !generation_active.guardian)) {
     pending_reload = 1;
     return 1;
   }
@@ -217,21 +221,28 @@ static int generation_start(struct ev_loop *loop) {
     for (struct zone *z = zonelist; z; z = z->z_next)
       generation_message_size += sizeof(struct generation_zone);
   }
-  int pair[2];
+  int pair[2], life[2];
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) return 0;
+  if (pipe(life) < 0) { close(pair[0]); close(pair[1]); return 0; }
   unsigned char *message = malloc(generation_message_size);
-  if (!message) { close(pair[0]); close(pair[1]); return 0; }
+  if (!message) { close(pair[0]); close(pair[1]); close(life[0]); close(life[1]); return 0; }
   if (flog) fflush(flog);
   ++generation_id;
   pid_t pid = fork();
-  if (!pid) { close(pair[0]); generation_guardian(pair[1]); }
-  close(pair[1]);
-  if (pid < 0) { close(pair[0]); free(message); return 0; }
+  if (!pid) {
+    close(pair[0]); close(life[0]);
+    /* Every descendant retains life[1]. EOF proves all generation writers
+     * have exited, including orphaned workers after a guardian crash. */
+    generation_guardian(pair[1]);
+  }
+  close(pair[1]); close(life[1]);
+  if (pid < 0) { close(pair[0]); close(life[0]); free(message); return 0; }
   generation_candidate = (struct generation_process){
-    .guardian = pid, .fd = pair[0], .message = message, .id = generation_id,
+    .guardian = pid, .fd = pair[0], .life = life[0], .message = message, .id = generation_id,
     .deadline = ev_time() + generation_timeout
   };
   make_socket_nonblocking(pair[0]);
+  make_socket_nonblocking(life[0]);
   can_reload = 0;
   rbldnsd_control_reload(-1);
   dslog(LOG_INFO, 0, "candidate guardian %d started", (int)pid);
@@ -253,8 +264,9 @@ static int generation_exited(pid_t pid) {
     if (g->owner) kill(-g->owner, SIGKILL);
     close(g->fd);
     free(g->message);
-    rbldnsd_control_release_generation((unsigned)g->id);
-    memset(g, 0, sizeof(*g));
+    g->message = NULL;
+    g->guardian = 0;
+    /* Keep the generation occupied until its inherited liveness pipe closes. */
     if (i == 0) rbldnsd_control_reload(0);
     if (i == 0) dslog(LOG_WARNING, 0, "candidate failed; retaining active generation");
     if (!generation_active.guardian && i != 2) {
@@ -269,7 +281,23 @@ static int generation_exited(pid_t pid) {
   return 0;
 }
 
+static void generation_collect(void) {
+  struct generation_process *sets[] = {
+    &generation_candidate, &generation_active, &generation_retiring
+  };
+  for (unsigned i = 0; i < 3; ++i) {
+    struct generation_process *g = sets[i];
+    if (!g->id || g->guardian) continue;
+    char ignored;
+    if (read(g->life, &ignored, 1) != 0) continue;
+    close(g->life);
+    rbldnsd_control_release_generation((unsigned)g->id);
+    memset(g, 0, sizeof(*g));
+  }
+}
+
 static void generation_supervise(struct ev_loop *loop, ev_timer *w, int revents) {
+  generation_collect();
   struct generation_process *g = &generation_candidate;
   if (g->guardian) {
     if (ev_time() >= g->deadline) {
@@ -288,7 +316,7 @@ static void generation_supervise(struct ev_loop *loop, ev_timer *w, int revents)
         if (write(g->fd, "A", 1) == 1) g->state = 1;
       }
     }
-    if (g->state == 1) {
+    if (g->state == 1 && (!generation_active.id || generation_active.guardian)) {
       char activated;
       if (read(g->fd, &activated, 1) == 1 && activated == 'A') {
         unsigned char *p = g->message + sizeof(pid_t);
@@ -320,7 +348,8 @@ static void generation_supervise(struct ev_loop *loop, ev_timer *w, int revents)
       }
     }
   }
-  can_reload = !generation_candidate.guardian && !generation_retiring.guardian;
+  can_reload = !generation_candidate.id && !generation_retiring.id &&
+               (!generation_active.id || generation_active.guardian);
   if (can_reload && pending_reload) generation_start(loop);
 }
 
