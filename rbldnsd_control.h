@@ -29,4 +29,8 @@ void rbldnsd_control_rate_limited(void);
 /* Extension returns response byte count, or -1 for an unknown command. */
 void rbldnsd_control_extension(int (*)(const char *, char *, size_t));
 void rbldnsd_control_close(void);
+#ifdef RBLDNSD_CONTROL_TESTING
+/* Test-only stop point immediately after the atomic slot reservation. */
+void rbldnsd_control_test_reservation_hook(void (*hook)(void));
+#endif
 #endif

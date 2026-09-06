@@ -13,9 +13,10 @@ class ControlSlots(unittest.TestCase):
         self.assertTrue(binary.exists(), 'build test_control_slots alongside rbldnsd')
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run([str(binary), directory + '/control'],
-                                    capture_output=True, text=True, timeout=10)
+                                    capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('safe reuse passed', result.stdout)
+            self.assertIn('300 allocator crashes reclaimed', result.stdout)
 
 
 if __name__ == '__main__':

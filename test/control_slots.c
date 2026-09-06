@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+static void stop_at_reservation(void) { raise(SIGSTOP); }
 static void no_action(int action) { (void)action; }
 static void byte(int fd) { char c; assert(read(fd,&c,1)==1); }
 static void send_byte(int fd) { assert(write(fd,"X",1)==1); }
@@ -60,7 +61,31 @@ int main(int argc,char **argv) {
   assert(waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==0);
   rbldnsd_control_release_generation_dead(4);
   assert(rbldnsd_control_slot_alloc(6)==slot);
+  close(commands[1]); close(replies[0]);
+  rbldnsd_control_release_generation_dead(5);
+  rbldnsd_control_release_generation_dead(6);
+  /* More crashes than the entire slot pool: each allocator dies immediately
+   * after reservation, before PID/baseline initialization. Reclaiming must
+   * identify the new generation, not the previous occupant's metadata. */
+  for(unsigned g=100;g<400;++g) {
+    child=fork(); assert(child>=0);
+    if(!child) {
+      rbldnsd_control_child();
+      rbldnsd_control_test_reservation_hook(stop_at_reservation);
+      rbldnsd_control_slot_alloc(g);
+      _exit(99);
+    }
+    assert(waitpid(child,&status,WUNTRACED)==child && WIFSTOPPED(status));
+    rbldnsd_control_release_generation(g);
+    other=rbldnsd_control_slot_alloc(999); assert(other==1);
+    assert(kill(child,SIGKILL)==0);
+    assert(waitpid(child,&status,0)==child && WIFSIGNALED(status));
+    rbldnsd_control_release_generation_dead(g);
+    assert(rbldnsd_control_slot_alloc(1000)==0);
+    rbldnsd_control_release_generation_dead(999);
+    rbldnsd_control_release_generation_dead(1000);
+  }
   rbldnsd_control_close();
-  puts("quarantine: live writer, late publisher, draining and safe reuse passed");
+  puts("300 allocator crashes reclaimed; quarantine: live writer, late publisher, draining and safe reuse passed");
   return 0;
 }

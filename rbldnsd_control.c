@@ -16,17 +16,26 @@
 #include <inttypes.h>
 
 #define SLOTS 257
+/* Generation and phase are published in one atomic reservation. No killed
+ * allocator can leave an unidentifiable slot with stale generation metadata. */
+#define OWN(g,phase) (((uint64_t)(g)<<32) | (phase))
+#define PHASE(ownership) ((unsigned)((ownership)&UINT32_MAX))
+#define GENERATION(ownership) ((unsigned)((ownership)>>32))
 #define LOAD(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
 #define ADD(p,n) __atomic_fetch_add((p),(n),__ATOMIC_RELAXED)
 #define SET(p,n) __atomic_store_n((p),(n),__ATOMIC_RELEASE)
 struct counts { uint64_t queries, in, replies, out, noerror, nxdomain, other,
   unanswered, send_errors, receive_drops, rate_limited; };
 struct slot { struct counts c, baseline; uint64_t backlog, backlog_bytes;
-  unsigned generation, state; pid_t pid; };
+  uint64_t ownership; pid_t pid; };
 static struct shared { struct slot slots[SLOTS];
   unsigned generation, receive_accounting, send_accounting; int reload_result; time_t reload_time; } *shared;
 static int current = -1, fd = -1;
 static pid_t controller;
+#ifdef RBLDNSD_CONTROL_TESTING
+static void (*reservation_hook)(void);
+void rbldnsd_control_test_reservation_hook(void (*hook)(void)) { reservation_hook=hook; }
+#endif
 static ev_io watcher;
 static void (*action)(int);
 static int (*extension)(const char *,char *,size_t);
@@ -41,13 +50,13 @@ static void reclaim_quarantined(void) {
   if(!shared || getpid()!=controller) return;
   for(int i=0;i<SLOTS;++i) {
     struct slot *s=&shared->slots[i];
-    if(LOAD(&s->state)!=5) continue;
+    uint64_t ownership=LOAD(&s->ownership);
+    if(PHASE(ownership)!=5) continue;
     pid_t pid=LOAD(&s->pid);
     /* An unpublished child could still start: only all-writers-dead proof
      * can reclaim a PID-zero slot. */
     if(pid>0 && kill(pid,0)<0 && errno==ESRCH) {
-      unsigned quarantined=5;
-      __atomic_compare_exchange_n(&s->state,&quarantined,0,0,
+      __atomic_compare_exchange_n(&s->ownership,&ownership,0,0,
         __ATOMIC_RELEASE,__ATOMIC_RELAXED);
     }
   }
@@ -113,7 +122,8 @@ static void receive_command(struct ev_loop *loop, ev_io *w, int events) {
     int comma=0, next=-1;
     for(int i=(int)first;i<SLOTS;++i) {
       struct slot *s=&shared->slots[i];
-      if(!LOAD(&s->state) || LOAD(&s->state)>=4) continue;
+      uint64_t ownership=LOAD(&s->ownership);
+      if(!ownership || PHASE(ownership)>=4) continue;
       if(comma==8) { next=i; break; }
       struct counts base={0}, c={0}; collect(&base,&s->baseline); collect(&c,&s->c);
 #define C(n) c.n -= base.n
@@ -121,8 +131,8 @@ static void receive_command(struct ev_loop *loop, ev_io *w, int events) {
       C(unanswered); C(send_errors); C(receive_drops); C(rate_limited);
 #undef C
       append(&p,&left,"%s{\"slot\":%d,\"pid\":%ld,\"generation\":%u,\"state\":\"%s\",",
-        comma++ ? "," : "",i,(long)LOAD(&s->pid),s->generation,
-        LOAD(&s->state)==3 ? "draining" : LOAD(&s->state)==2 ? "running" : "starting");
+        comma++ ? "," : "",i,(long)LOAD(&s->pid),GENERATION(ownership),
+        PHASE(ownership)==3 ? "draining" : PHASE(ownership)==2 ? "running" : "starting");
       counters(&p,&left,&c);
       append(&p,&left,",\"delayed_backlog\":%" PRIu64 ",\"delayed_bytes\":%" PRIu64 "}",
         LOAD(&s->backlog),LOAD(&s->backlog_bytes));
@@ -176,15 +186,19 @@ int rbldnsd_control_slot_alloc(unsigned generation) {
   if(!shared) return -1;
   reclaim_quarantined();
   for(int i=0;i<SLOTS;++i) {
-    unsigned empty=0;
-    if(!__atomic_compare_exchange_n(&shared->slots[i].state,&empty,4,0,
+    uint64_t empty=0, reserved=OWN(generation,4);
+    if(!__atomic_compare_exchange_n(&shared->slots[i].ownership,&empty,reserved,0,
         __ATOMIC_ACQUIRE,__ATOMIC_RELAXED)) continue;
+#ifdef RBLDNSD_CONTROL_TESTING
+    if(reservation_hook) reservation_hook();
+#endif
     shared->slots[i].baseline=shared->slots[i].c;
     shared->slots[i].backlog=shared->slots[i].backlog_bytes=0;
     shared->slots[i].pid=0;
 
-    shared->slots[i].generation=generation;
-    SET(&shared->slots[i].state,1); return i;
+    if(!__atomic_compare_exchange_n(&shared->slots[i].ownership,&reserved,
+         OWN(generation,1),0,__ATOMIC_RELEASE,__ATOMIC_RELAXED)) return -1;
+    return i;
   }
   return -1;
 }
@@ -196,26 +210,29 @@ int rbldnsd_control_worker(int slot) {
   if(!shared) return 1;
   if(slot<0 || slot>=SLOTS) return 0;
   SET(&shared->slots[slot].pid,getpid());
-  unsigned starting=1;
-  if(!__atomic_compare_exchange_n(&shared->slots[slot].state,&starting,2,0,
+  uint64_t starting=LOAD(&shared->slots[slot].ownership);
+  if(PHASE(starting)!=1) return 0;
+  if(!__atomic_compare_exchange_n(&shared->slots[slot].ownership,&starting,
+       OWN(GENERATION(starting),2),0,
        __ATOMIC_ACQ_REL,__ATOMIC_RELAXED)) return 0;
   current=slot;
   return 1;
 }
 void rbldnsd_control_release(int slot) {
-  if(shared && slot>=0 && shared->slots[slot].state) {
-    SET(&shared->slots[slot].state,0);
+  if(shared && slot>=0 && slot<SLOTS) {
+    SET(&shared->slots[slot].ownership,0);
   }
 }
 void rbldnsd_control_release_generation(unsigned g) {
   if(!shared || getpid()!=controller) return;
   for(int i=0;i<SLOTS;++i) {
-    unsigned state=LOAD(&shared->slots[i].state);
-    /* State 4 is a new reservation whose generation is not published yet.
-     * Its stale generation field cannot identify it. Never reclaim it here. */
-    if(state && state!=4 && shared->slots[i].generation==g) {
-      while(state && state!=4 && state!=5 && !__atomic_compare_exchange_n(
-        &shared->slots[i].state,&state,5,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED)) {}
+    uint64_t ownership=LOAD(&shared->slots[i].ownership);
+    while(ownership && GENERATION(ownership)==g && PHASE(ownership)<5) {
+      /* A reservation may retain the previous occupant's PID: phase 6 cannot
+       * use PID-based reclamation and requires the all-writers-dead proof. */
+      uint64_t quarantined=OWN(g,PHASE(ownership)==4 ? 6 : 5);
+      if(__atomic_compare_exchange_n(&shared->slots[i].ownership,&ownership,
+         quarantined,0,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED)) break;
     }
   }
   reclaim_quarantined();
@@ -223,16 +240,18 @@ void rbldnsd_control_release_generation(unsigned g) {
 void rbldnsd_control_release_generation_dead(unsigned g) {
   if(!shared || getpid()!=controller) return;
   for(int i=0;i<SLOTS;++i) {
-    unsigned state=LOAD(&shared->slots[i].state);
-    if(state && state!=4 && shared->slots[i].generation==g)
-      rbldnsd_control_release(i);
+    uint64_t ownership=LOAD(&shared->slots[i].ownership);
+    while(ownership && GENERATION(ownership)==g && !__atomic_compare_exchange_n(
+      &shared->slots[i].ownership,&ownership,0,0,__ATOMIC_RELEASE,__ATOMIC_RELAXED)) {}
   }
 }
 void rbldnsd_control_generation(unsigned g) { if(shared) shared->generation=g; }
 void rbldnsd_control_reload(int r) { if(shared) {shared->reload_result=r;shared->reload_time=time(NULL);} }
 void rbldnsd_control_draining(void) { if(shared && current>=0) {
-  unsigned running=2;
-  __atomic_compare_exchange_n(&shared->slots[current].state,&running,3,0,
+  uint64_t running=LOAD(&shared->slots[current].ownership);
+  if(PHASE(running)!=2) return;
+  __atomic_compare_exchange_n(&shared->slots[current].ownership,&running,
+    OWN(GENERATION(running),3),0,
     __ATOMIC_RELEASE,__ATOMIC_RELAXED);
 } }
 void rbldnsd_control_query(unsigned b,int r,unsigned rc) {
