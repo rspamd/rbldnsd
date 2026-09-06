@@ -29,6 +29,7 @@
 #include "rbldnsd_snapshot.h"
 #include "rbldnsd_udp.h"
 #include "rbldnsd_overlay.h"
+#include "rbldnsd_ratelimit.h"
 #include "sds/sds.h"
 
 
@@ -139,6 +140,7 @@ static int pending_reload = 0;
 static char *control_path;
 static unsigned control_generation;
 static unsigned overlay_capacity;
+static char *ratelimit_path;
 static int nworkers = 1, is_worker, worker_draining;
 static int is_generation, generation_control = -1, generation_activated;
 static unsigned generation_timeout = 60;
@@ -219,6 +221,7 @@ static void NORETURN usage(int exitcode) {
 " -p pidfile - write pid to specified file\n"
 " -n - do not become a daemon\n"
 " -O count - bounded shared exact-domain overrides (requires -M)\n"
+" -R file - customer quota policy (shared across workers)\n"
 " -M path - owner-only Unix datagram control socket (JSON replies)\n"
 " -W count - run 1..128 UDP workers with SO_REUSEPORT (default: 1)\n"
 " -T seconds - multiworker candidate load/start deadline (default: 60)\n"
@@ -612,13 +615,14 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
 
   if (argc <= 1) usage(1);
 
-  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:T:O:")) != EOF)
+  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:T:O:R:")) != EOF)
     switch(c) {
     case 'O': {
       char *end; unsigned long n = strtoul(optarg, &end, 10);
       if (!*optarg || *end || n < 1 || n > 65536) error(0, "invalid overlay capacity (1..65536)");
       overlay_capacity = n; break;
     }
+    case 'R': ratelimit_path = optarg; break;
     case 'M': control_path = optarg; break;
     case 'T': {
       char *end;
@@ -745,6 +749,10 @@ break;
     default: error(0, "type `%.50s -h' for help", progname);
     }
     /* options switch end */
+
+  char quota_error[160];
+  if (rbldnsd_ratelimit_init(ratelimit_path, quota_error, sizeof(quota_error)) < 0)
+    error(0, "%s", quota_error);
 
   if (!(argc -= optind))
     error(0, "no zone(s) to service specified (-h for help)");
@@ -2222,6 +2230,7 @@ int main(int argc, char **argv) {
 
   rbldnsd_overlay_close();
   rbldnsd_control_close();
+  rbldnsd_ratelimit_close();
   free(io_evs);
   free(stat_evs);
 

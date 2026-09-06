@@ -1328,3 +1328,59 @@ but are ephemeral until included in an explicitly compacted snapshot.
 Online compaction requires dnsnapshot; a separate output path supports
 export from either dataset type. See README.overlay.md for command syntax,
 activation, reclamation, and persistence semantics.
+.SH CUSTOMER QUOTAS
+The optional \fB-R file\fR loads a customer quota policy before dropping
+privileges or entering a chroot. It is disabled by default. The file is read
+only at startup; changing policy requires a restart. Zone reloads and worker
+replacement deliberately preserve quota debt.
+.PP
+Each non-comment line specifies a scope, selector, requests per second, and
+burst capacity, separated by whitespace. Rates and bursts are positive integers
+(rates at most 1000000000, bursts at most 1000000). Lines beginning with # and
+trailing # comments are ignored. For example:
+.nf
+buckets 16384
+key * 1000 2000
+key customer1 100 200
+source4 24 5000 10000
+source6 64 5000 10000
+zone example.org 20000 40000
+.fi
+.PP
+\fBkey\fR matches an authenticated ACL key, never an arbitrary query label.
+Its selector is an exact key, or * for a separate allowance per key.
+An identity used in several zones shares the same key allowance. Metadata
+queries that bypass ACL authentication are not charged to a key.
+\fBzone\fR selects a zone name (case insensitive, optional final dot), or *
+for a separate allowance per zone.
+\fBsource4\fR and \fBsource6\fR group clients by the specified IPv4 or IPv6
+prefix length (0..32 or 0..128), across zones and keys. Ports are ignored.
+Specific key/zone policies use dedicated accounting, with no hash collisions.
+.PP
+All applicable constraints apply, in file order. Specific policies do not
+replace wildcard policies: the stricter effective allowance wins. A request
+charged to an earlier constraint remains charged if a later constraint rejects
+it. Over-limit requests are silently dropped and counted as \fBrate_limited\fR
+by the local control statistics. These are quotas for authorized data queries
+after ACL resolution, not reflection response-rate limiting; malformed,
+unauthorized and non-authoritative requests are outside their scope.
+.PP
+Allowances are global to one server instance, regardless of worker count.
+Accounting uses a shared mapping separate from zone data, lock-free atomic
+64-bit timestamps, and a monotonic clock. A killed worker cannot leave a lock
+held. The same mapping is inherited by replacement generations; a full server
+restart resets allowances. Sustained rates are rounded conservatively to
+nanosecond intervals. Excessive contention also fails closed.
+.PP
+Memory and lookup work are bounded: at most 32 rules, each with 16384 buckets
+by default. The optional \fBbuckets N\fR directive, before all rules, accepts
+1..65536. Memory is exactly eight bytes per bucket per rule (at most 16 MiB),
+plus fixed policy metadata. Wildcard key/zone and source-prefix identities map
+to buckets using a randomly keyed SipHash. Hash collisions conservatively share
+an allowance and can cause false rejections; increase buckets or configure
+explicit key/zone rules for important customers. Buckets never allocate keys,
+evict victims, or reset debt when new identities arrive. Randomization impedes
+deliberate targeting but does not prevent accidental collisions or broad source
+churn from consuming shared buckets. Capacity becomes available only as the
+existing debt refills. Platforms without lock-free 64-bit atomics reject quota
+configuration at startup.

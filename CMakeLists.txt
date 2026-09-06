@@ -79,6 +79,7 @@ add_executable(rbldnsd
         rbldnsd.c
         rbldnsd_control.c
         rbldnsd_udp.c
+        rbldnsd_ratelimit.c
         rbldnsd_acl.c
         rbldnsd_aclkey.c
         rbldnsd_combined.c
