@@ -13,13 +13,13 @@ BINARY = test_snapshot.BINARY
 
 class Overlay(test_snapshot.Snapshot):
     # Reuse snapshot fixture and wire-query helper, not its test cases.
-    def start_overlay(self, kind='dnsnapshot', capacity=4):
+    def start_overlay(self, kind='dnsnapshot', capacity=4, workers=3):
         self.control = str(self.root / ('control' + str(len(self.procs))))
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.bind(('127.0.0.1', 0))
             port = s.getsockname()[1]
         path = self.snap if kind == 'dnsnapshot' else self.source
-        proc = subprocess.Popen([BINARY, '-n', '-W', '3', '-c', '0',
+        proc = subprocess.Popen([BINARY, '-n', '-W', str(workers), '-c', '0',
                                  '-M', self.control, '-O', str(capacity),
                                  '-b', '127.0.0.1/' + str(port),
                                  'example.test:' + kind + ':' + str(path)],
@@ -104,10 +104,14 @@ class Overlay(test_snapshot.Snapshot):
         _, original_port = self.start('dnsnapshot', self.snap)
         self.assertNotIn(b'override', self.query(original_port, 'listed'))
 
-    @unittest.skipUnless(os.environ.get('RBLDNSD_OVERLAY_ONLINE'),
-                         'requires integrated generation retirement hooks')
     def test_online_compaction_reclaims_preserves_concurrent_updates(self):
-        _, port = self.start_overlay(capacity=3)
+        self.check_online_compaction(3)
+
+    def test_single_worker_online_compaction(self):
+        self.check_online_compaction(1)
+
+    def check_online_compaction(self, workers):
+        _, port = self.start_overlay(capacity=3, workers=workers)
         self.command('overlay-del 0 a.wild')
         self.command('overlay-put 1 listed 127.0.0.8 before-checkpoint')
         self.assertTrue(self.command('overlay-compact 2')['accepted'])
