@@ -33,6 +33,7 @@
 #include "dns_hash.h"
 
 #include "rbldnsd.h"
+#include "rbldnsd_overlay.h"
 
 struct key {
   unsigned len;
@@ -462,6 +463,8 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
   khiter_t k;
   struct key srch, *pkey;
 
+  int overlay = rbldnsd_overlay_query(ds, qi, pkt);
+  if (overlay >= 0) return overlay;
   if (!qlab) return 0;		/* do not match empty dn */
   check_query_overwrites(qi);
 

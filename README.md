@@ -136,3 +136,5 @@ not all network loss. The kernel reports them only with a later received packet;
 loss after the last delivered packet remains unobserved. Truncated ancillary
 reports are ignored and a later complete report catches up. Other platforms
 report receive-drop accounting as unavailable.
+Bounded shared domain updates and online snapshot compaction: see
+[README.overlay.md](README.overlay.md).

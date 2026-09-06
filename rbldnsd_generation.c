@@ -5,11 +5,13 @@
  * query workers. No dataset pointers cross an IPC boundary.
  */
 struct generation_stamp { time_t stamp; off_t size; };
+struct generation_base { uint64_t dev, ino; };
 struct generation_zone { time_t stamp, expires; };
 struct generation_process {
   pid_t guardian, owner;
   int fd, life, state;
   unsigned long id;
+  struct generation_base base;
   ev_tstamp deadline;
   unsigned char *message;
   size_t used;
@@ -89,6 +91,9 @@ static void generation_owner(int fd) {
     struct generation_zone state = { z->z_stamp, z->z_expires };
     if (!generation_write(fd, &state, sizeof(state))) _exit(1);
   }
+  struct generation_base base;
+  rbldnsd_overlay_base_identity(&base.dev, &base.ino);
+  if (!generation_write(fd, &base, sizeof(base))) _exit(1);
   char command;
   if (read(fd, &command, 1) != 1 || command != 'A') _exit(1);
   for (int i = 0; i < nworkers; ++i)
@@ -213,7 +218,7 @@ static int generation_start(struct ev_loop *loop) {
   if (generation_active.guardian && !nextdataset2reload(NULL) &&
       !call_hook(reload_check, (zonelist))) return 1;
   if (!generation_message_size) {
-    generation_message_size = sizeof(pid_t);
+    generation_message_size = sizeof(pid_t) + sizeof(struct generation_base);
     struct dataset *ds = NULL;
     while ((ds = nextdataset(ds)) != NULL)
       for (struct dsfile *f = ds->ds_dsf; f; f = f->dsf_next)
@@ -332,6 +337,7 @@ static void generation_supervise(struct ev_loop *loop, ev_timer *w, int revents)
           memcpy(&state, p, sizeof(state)); p += sizeof(state);
           z->z_stamp = state.stamp; z->z_expires = state.expires;
         }
+        memcpy(&g->base, p, sizeof(g->base));
         free(g->message); g->message = NULL;
         generation_retiring = generation_active;
         generation_active = *g;
@@ -348,6 +354,8 @@ static void generation_supervise(struct ev_loop *loop, ev_timer *w, int revents)
       }
     }
   }
+  if (generation_active.guardian && !generation_retiring.id)
+    rbldnsd_overlay_retired(generation_active.base.dev, generation_active.base.ino);
   can_reload = !generation_candidate.id && !generation_retiring.id &&
                (!generation_active.id || generation_active.guardian);
   if (can_reload && pending_reload) generation_start(loop);

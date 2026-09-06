@@ -11,6 +11,7 @@
 #include <syslog.h>
 #include "rbldnsd.h"
 #include "rbldnsd_snapshot.h"
+#include "rbldnsd_overlay.h"
 #define HDR 128U
 #define REC 24U
 #define LIMIT (1024U * 1024U * 1024U)
@@ -132,6 +133,7 @@ int rbldnsd_snapshot_load(struct dataset *ds,int fd,struct dsctx *ctx) {
     ns->dsns_next=NULL; memcpy(ns->dsns_dn,p+off,n); *tail=ns; tail=&ns->dsns_next;
   }
   ds->ds_nsttl=get(p+92); ds->ds_expires=(time_t)expiry;
+  rbldnsd_overlay_loaded(ds, fd);
   ds->ds_dsd->map=p; ds->ds_dsd->size=size; ds->ds_dsd->count=count;
   ds->ds_ttl=get(p+20);
   for(unsigned i=0;i<11;i++) ds->ds_subst[i]=get(p+32+i*4)?(char *)p+get(p+32+i*4):NULL;
@@ -155,6 +157,8 @@ static int answer(const struct dataset *ds,const struct dnsqinfo *qi,struct dnsp
 static int ds_dnsnapshot_query(const struct dataset *ds,const struct dnsqinfo *qi,struct dnspacket *pkt) {
   const unsigned char *dn=qi->qi_dn; unsigned len=qi->qi_dnlen0,lab=qi->qi_dnlab;
   struct snapshot_entry e;
+  int overlay = rbldnsd_overlay_query(ds, qi, pkt);
+  if (overlay >= 0) return overlay;
   if(!lab) return 0;
   check_query_overwrites(qi);
   if(rbldnsd_snapshot_lookup(ds,dn,len,0,&e)) return answer(ds,qi,pkt,&e);
@@ -219,7 +223,7 @@ static unsigned append(struct writer *w,const void *data,size_t len) {
     w->buf=p; w->bufcap=cap;
   } memcpy(w->buf+w->len,data,len); w->len+=len; return off;
 }
-int rbldnsd_snapshot_write_iter(const struct dataset *ds,const char *path, snapshot_produce_fn *produce,void *arg) {
+int rbldnsd_snapshot_write_iter_ident(const struct dataset *ds,const char *path, snapshot_produce_fn *produce,void *arg,uint64_t *dev,uint64_t *ino) {
   struct writer w={0}; int ok=0,fd=-1; char *tmp=NULL;
 
   if(!produce(collect,&w,arg) || w.n>(LIMIT-HDR)/REC) goto done;
@@ -283,6 +287,10 @@ int rbldnsd_snapshot_write_iter(const struct dataset *ds,const char *path, snaps
   size_t pos=0;
   while(pos<w.len) { ssize_t n=write(fd,w.buf+pos,w.len-pos); if(n<0 && errno==EINTR) continue; if(n<=0) goto done; pos+=n; }
   if(fchmod(fd,0644)<0 || fsync(fd)<0) goto done;
+  struct stat identity;
+  if(fstat(fd,&identity)<0) goto done;
+  if(dev) *dev=(uint64_t)identity.st_dev;
+  if(ino) *ino=(uint64_t)identity.st_ino;
   if(close(fd)<0) { fd=-1; goto done; } fd=-1;
   if(rename(tmp,path)<0) goto done;
   ok=1;
@@ -291,6 +299,10 @@ done:
   if(tmp) { if(!ok) unlink(tmp); free(tmp); }
   for(size_t i=0;i<w.n;i++) free(w.entries[i].params);
   free(w.entries); free(w.buf); return ok;
+}
+
+int rbldnsd_snapshot_write_iter(const struct dataset *ds,const char *path, snapshot_produce_fn *produce,void *arg) {
+  return rbldnsd_snapshot_write_iter_ident(ds,path,produce,arg,NULL,NULL);
 }
 
 static int dnhash_produce(snapshot_visit_fn *visit,void *visit_arg,void *arg) {

@@ -1314,3 +1314,17 @@ with that file to serve it through a read-only memory mapping. A snapshot
 preserves domain answers, exclusions, wildcards, entry parameters, substitutions,
 and zone metadata. Publish new snapshots by atomic rename and reload; never
 modify a mapped file in place. See README.snapshot.md for limits and format.
+
+.SH INCREMENTAL DOMAIN OVERLAYS
+.B -O capacity
+with
+.B -M path
+allocates a bounded shared overlay for exactly one dnhash or dnsnapshot
+dataset. The capacity is 1 through 65536 distinct exact names. The control
+commands overlay-status, overlay-put, overlay-del, and overlay-compact use
+explicit expected revision numbers. Deletions are exact exclusions that
+also mask wildcard answers. Updates survive worker replacement and reload,
+but are ephemeral until included in an explicitly compacted snapshot.
+Online compaction requires dnsnapshot; a separate output path supports
+export from either dataset type. See README.overlay.md for command syntax,
+activation, reclamation, and persistence semantics.

@@ -28,6 +28,7 @@
 #include "rbldnsd_control.h"
 #include "rbldnsd_snapshot.h"
 #include "rbldnsd_udp.h"
+#include "rbldnsd_overlay.h"
 #include "sds/sds.h"
 
 
@@ -137,6 +138,7 @@ static int pending_reload = 0;
 #define MAXWORKERS 128
 static char *control_path;
 static unsigned control_generation;
+static unsigned overlay_capacity;
 static int nworkers = 1, is_worker, worker_draining;
 static int is_generation, generation_control = -1, generation_activated;
 static unsigned generation_timeout = 60;
@@ -216,6 +218,7 @@ static void NORETURN usage(int exitcode) {
 " -c check - time interval to check for data file updates (1m)\n"
 " -p pidfile - write pid to specified file\n"
 " -n - do not become a daemon\n"
+" -O count - bounded shared exact-domain overrides (requires -M)\n"
 " -M path - owner-only Unix datagram control socket (JSON replies)\n"
 " -W count - run 1..128 UDP workers with SO_REUSEPORT (default: 1)\n"
 " -T seconds - multiworker candidate load/start deadline (default: 60)\n"
@@ -609,8 +612,13 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
 
   if (argc <= 1) usage(1);
 
-  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:T:")) != EOF)
+  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:T:O:")) != EOF)
     switch(c) {
+    case 'O': {
+      char *end; unsigned long n = strtoul(optarg, &end, 10);
+      if (!*optarg || *end || n < 1 || n > 65536) error(0, "invalid overlay capacity (1..65536)");
+      overlay_capacity = n; break;
+    }
     case 'M': control_path = optarg; break;
     case 'T': {
       char *end;
@@ -1353,6 +1361,11 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 
   if (nworkers == 1) {
     rbldnsd_control_reload(r);
+    if (r) {
+      uint64_t dev, ino;
+      rbldnsd_overlay_base_identity(&dev, &ino);
+      rbldnsd_overlay_retired(dev, ino);
+    }
     if (r && control_path) rbldnsd_control_generation(++control_generation);
   }
   return r;
@@ -2109,6 +2122,9 @@ int main(int argc, char **argv) {
     dumpstats_z();
 #endif
 
+  if (overlay_capacity && !control_path) error(0, "-O requires -M");
+  if (rbldnsd_overlay_init(loop, overlay_capacity, control_action) < 0)
+    error(errno, "cannot initialize domain overlay (requires exactly one domain dataset)");
   if (rbldnsd_control_init(loop, control_path, control_action) < 0)
     error(errno, "cannot create control socket");
   /* Allocate shared per-socket overflow baselines before any worker fork. */
@@ -2204,6 +2220,7 @@ int main(int argc, char **argv) {
     close (update_sock);
   }
 
+  rbldnsd_overlay_close();
   rbldnsd_control_close();
   free(io_evs);
   free(stat_evs);
