@@ -29,6 +29,28 @@ class Control(test_workers.Workers):
             finally:
                 os.unlink(path)
 
+    def test_transport_counters_and_truncated_query(self):
+        self.start(count=1)
+        before = self.command('stats')
+        self.assertTrue(before['send_error_accounting'])
+        import sys
+        self.assertEqual(before['receive_drop_accounting'], sys.platform.startswith('linux'))
+        # A syntactically valid prefix must not make an oversized truncated
+        # datagram look like an ordinary DNS request.
+        import struct
+        packet = struct.pack('!6H', 123, 0, 1, 0, 0, 0)
+        packet += b'\x06listed\x07example\x04test\0' + struct.pack('!HH', 16, 1)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(.2)
+            client.sendto(packet + b'X' * 8000, ('127.0.0.1', self.port))
+            with self.assertRaises(socket.timeout):
+                client.recv(65535)
+        self.assertEqual(self.query(), b'OLD')
+        after = self.command('stats')
+        self.assertEqual(after['totals']['queries'] - before['totals']['queries'], 2)
+        self.assertEqual(after['totals']['unanswered'] - before['totals']['unanswered'], 1)
+        self.assertEqual(after['totals']['send_errors'], 0)
+
     def test_counters_survive_reload_and_crash(self):
         self.start()
         before = self.command('stats')

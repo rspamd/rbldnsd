@@ -119,3 +119,20 @@ acceptance, not completion: poll status to observe the resulting generation or
 reload failure. Commands and responses never wait for a client to become writable;
 if a client loses a reply, it must inspect status before retrying a mutation.
 Compiled read-only domain datasets: see [README.snapshot.md](README.snapshot.md).
+
+UDP sends are bounded: a partial `sendmmsg()` continues from its unsent tail;
+`EAGAIN`, `ENOBUFS`, other send failures, or exhaustion of four `EINTR` retries
+cause remaining replies to be dropped and counted in `send_errors`. This also
+applies to delayed replies. No unbounded send queue or busy retry loop is used.
+`send_errors` counts discarded datagrams, not failed system calls; response and
+byte totals still count generated responses. Oversized truncated input datagrams
+are counted as unanswered and never parsed as complete DNS queries.
+
+On Linux, `receive_drops` uses `SO_RXQ_OVFL` ancillary reports. Counters and their
+per-socket baselines survive worker replacement in shared memory. Duplicate and
+out-of-order observations are ignored and 32-bit wraparound is handled, assuming
+fewer than 2^31 drops between observations. These are socket receive-queue drops,
+not all network loss. The kernel reports them only with a later received packet;
+loss after the last delivered packet remains unobserved. Truncated ancillary
+reports are ignored and a later complete report catches up. Other platforms
+report receive-drop accounting as unavailable.

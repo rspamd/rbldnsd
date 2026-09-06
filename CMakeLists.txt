@@ -78,6 +78,7 @@ add_executable(rbldnsd
         mempool.c
         rbldnsd.c
         rbldnsd_control.c
+        rbldnsd_udp.c
         rbldnsd_acl.c
         rbldnsd_aclkey.c
         rbldnsd_combined.c

@@ -27,6 +27,7 @@
 #include "rbldnsd.h"
 #include "rbldnsd_control.h"
 #include "rbldnsd_snapshot.h"
+#include "rbldnsd_udp.h"
 #include "sds/sds.h"
 
 
@@ -1447,7 +1448,19 @@ static void delayed_timer_cb(struct ev_loop *loop, ev_timer *w, int revents) {
     }
 
     if (r.buf && r.len) {
-      (void)sendto(r.fd, r.buf, r.len, 0, (struct sockaddr *)&r.peer, r.peerlen);
+      struct iovec iov = { r.buf, r.len };
+#ifdef WITH_RECVMMSG
+      struct mmsghdr batch = {0};
+      struct msghdr *header = &batch.msg_hdr;
+#else
+      struct msghdr batch = {0};
+      struct msghdr *header = &batch;
+#endif
+      header->msg_name = &r.peer;
+      header->msg_namelen = r.peerlen;
+      header->msg_iov = &iov;
+      header->msg_iovlen = 1;
+      rbldnsd_udp_send(r.fd, &batch, 1);
       delayed_bytes -= r.len;
       free(r.buf);
     }
@@ -1516,7 +1529,7 @@ static int request(int fd) {
 #else
   struct sockaddr_in peer_sa[MSGVEC_LEN];
 #endif
-  socklen_t salen = sizeof(peer_sa);
+  socklen_t salen = sizeof(peer_sa[0]);
   struct dnsqinfo qi;
   struct dnspacket pkt[MSGVEC_LEN];
   struct iovec iovs[MSGVEC_LEN];
@@ -1529,6 +1542,9 @@ static int request(int fd) {
   struct msghdr msg[MSGVEC_LEN];
 #endif
 
+  /* cmsghdr member guarantees alignment of each ancillary buffer. */
+  union { struct cmsghdr align; unsigned char data[CMSG_SPACE(sizeof(uint32_t))]; }
+    ancillary[MSGVEC_LEN];
   memset(msg, 0, sizeof(*msg) * MSGVEC_LEN);
 
   for (int i = 0; i < MSGVEC_LEN; i ++) {
@@ -1539,6 +1555,8 @@ static int request(int fd) {
     MSG_FIELD(msg[i], msg_namelen) = salen;
     MSG_FIELD(msg[i], msg_iov) = &iovs[i];
     MSG_FIELD(msg[i], msg_iovlen) = 1;
+    MSG_FIELD(msg[i], msg_control) = ancillary[i].data;
+    MSG_FIELD(msg[i], msg_controllen) = sizeof(ancillary[i].data);
   }
 #ifdef WITH_RECVMMSG
   q = recvmmsg(fd, msg, MSGVEC_LEN, 0, NULL);
@@ -1555,6 +1573,19 @@ static int request(int fd) {
 #ifdef WITH_RECVMMSG
     q = msg[i].msg_len;
 #endif
+#ifdef WITH_RECVMMSG
+    rbldnsd_udp_received(fd, &msg[i].msg_hdr);
+#else
+    rbldnsd_udp_received(fd, &msg[i]);
+#endif
+    if ((MSG_FIELD(msg[i], msg_flags) & MSG_TRUNC) ||
+        q > (int)sizeof(pkt[i].p_buf) ||
+        MSG_FIELD(msg[i], msg_namelen) > sizeof(peer_sa[i]) ||
+        MSG_FIELD(msg[i], msg_namelen) < sizeof(struct sockaddr_in)) {
+      replies_lengths[i] = 0;
+      rbldnsd_control_query(q, 0, 0);
+      continue;
+    }
     pkt[i].p_peerlen = MSG_FIELD(msg[i], msg_namelen);
     pkt[i].p_peer = MSG_FIELD(msg[i], msg_name);
     pkt[i].p_delay_ms = 0;
@@ -1584,23 +1615,14 @@ static int request(int fd) {
       MSG_FIELD(msg[cur_rep], msg_namelen) = MSG_FIELD(msg[i], msg_namelen);
       MSG_FIELD(msg[cur_rep], msg_iov) = &iovs[cur_rep];
       MSG_FIELD(msg[cur_rep], msg_iovlen) = 1;
+      MSG_FIELD(msg[cur_rep], msg_control) = NULL;
+      MSG_FIELD(msg[cur_rep], msg_controllen) = 0;
+      MSG_FIELD(msg[cur_rep], msg_flags) = 0;
       cur_rep ++;
     }
   }
 
-#ifdef WITH_RECVMMSG
-  while (sendmmsg(fd, msg, cur_rep, 0) < 0) {
-    if (errno != EINTR && errno != EAGAIN) {
-      break;
-    }
-  }
-#else
-  while (sendmsg(fd, msg, 0) < 0) {
-    if (errno != EINTR && errno != EAGAIN) {
-      break;
-    }
-  }
-#endif
+  rbldnsd_udp_send(fd, msg, cur_rep);
 
   return 1;
 }
@@ -2089,6 +2111,21 @@ int main(int argc, char **argv) {
 
   if (rbldnsd_control_init(loop, control_path, control_action) < 0)
     error(errno, "cannot create control socket");
+  /* Allocate shared per-socket overflow baselines before any worker fork. */
+  int udp_maxfd = 0;
+  for (int i = 0; i < nworkers; ++i)
+    for (int j = 0; j < numsock; ++j) {
+      int fd = nworkers > 1 ? worker_sockets[i][j] : sock[j];
+      if (fd > udp_maxfd) udp_maxfd = fd;
+    }
+  if (rbldnsd_udp_init((unsigned)udp_maxfd + 1) < 0)
+    error(errno, "cannot allocate UDP accounting");
+  int receive_accounting = 1;
+  for (int i = 0; i < nworkers; ++i)
+    for (int j = 0; j < numsock; ++j)
+      if (!rbldnsd_udp_enable(nworkers > 1 ? worker_sockets[i][j] : sock[j]))
+        receive_accounting = 0;
+  rbldnsd_control_transport_support(receive_accounting, 1);
   if (nworkers == 1) {
     rbldnsd_control_worker(rbldnsd_control_slot_alloc(1));
     rbldnsd_control_generation(control_generation = 1);
