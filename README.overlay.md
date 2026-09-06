@@ -35,7 +35,9 @@ Only the controller mutates the mapping. Every accepted put/delete increments
 the revision; a stale expected revision returns an error and the current
 revision. Validation or capacity errors leave the revision unchanged. After
 an acknowledgement, new queries on every worker see the updated mapping;
-queries already in progress may complete with their previous result. A
+queries already in progress may complete with their previous result. A reader
+that cannot obtain a stable entry within 64 attempts returns SERVFAIL, keeping
+the UDP loop responsive even if the writer is stopped during publication. A
 missing acknowledgement is ambiguous: inspect `overlay-status` before
 retrying. Replacing an existing name uses no additional capacity.
 

@@ -433,6 +433,8 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
   for(dsl = zone->z_dsl; dsl; dsl = dsl->dsl_next)
     found |= dsl->dsl_queryfn(dsl->dsl_ds, qi, pkt);
 
+  if (found & NSQUERY_SERVFAIL) refuse(DNS_R_SERVFAIL);
+
   if (found & NSQUERY_ADDPEER) {
 #ifdef NO_IPv6
     addrr_a_txt(pkt, qi->qi_tflag, pkt->p_substrr,

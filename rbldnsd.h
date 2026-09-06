@@ -184,6 +184,7 @@ ds_dumpfn_t(const struct dataset *ds, const unsigned char *odn, FILE *f);
 /* result flags from dataset queryfn */
 #define NSQUERY_FOUND	0x01
 #define NSQUERY_ADDPEER	0x02
+#define NSQUERY_SERVFAIL 0x04 /* dataset temporarily unavailable */
 
 struct dstype {	/* dst */
   const char *dst_name;		/* name of the type */

@@ -35,16 +35,17 @@ static int export_result; /* 0 never, 1 running, 2 success, -1 failed */
 static unsigned hash(const unsigned char *p,unsigned len) {
   unsigned h=2166136261U; while(len--) h=(h^*p++)*16777619U; return h;
 }
-static void read_slot(const struct slot *s,struct value *v) {
-  for (;;) {
+static int read_slot(const struct slot *s,struct value *v) {
+  for (unsigned attempt=0;attempt<64;attempt++) {
     unsigned seq=__atomic_load_n(&s->sequence,__ATOMIC_ACQUIRE);
     if(seq&1) continue;
     unsigned char *out=(unsigned char *)v;
     const unsigned char *in=(const unsigned char *)&s->value;
     for(size_t i=0;i<sizeof(*v);i++) out[i]=__atomic_load_n(in+i,__ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    if(seq==__atomic_load_n(&s->sequence,__ATOMIC_ACQUIRE)) return;
+    if(seq==__atomic_load_n(&s->sequence,__ATOMIC_ACQUIRE)) return 1;
   }
+  return 0; /* A stopped/dead writer must not stall the UDP event loop. */
 }
 /* Deleted hash slots preserve probe chains. At most capacity live entries,
  * even after arbitrarily many compaction cycles. */
@@ -52,7 +53,7 @@ static void read_slot(const struct slot *s,struct value *v) {
 static unsigned find(const unsigned char *name,unsigned len,struct value *v) {
   unsigned i=hash(name,len)&(tablesize-1), first=DELETED;
   for(unsigned n=0;n<tablesize;n++,i=(i+1)&(tablesize-1)) {
-    read_slot(&shared->slots[i],v);
+    if(!read_slot(&shared->slots[i],v)) return DELETED;
     if(v->len==DELETED) { if(first==DELETED) first=i; continue; }
     if(!v->len) { if(first!=DELETED) i=first; v->len=0; return i; }
     if(v->len==len && !memcmp(v->name,name,len)) return i;
@@ -74,7 +75,7 @@ void rbldnsd_overlay_base_identity(uint64_t *dev,uint64_t *ino) { *dev=base_dev;
 void rbldnsd_overlay_retired(uint64_t dev,uint64_t ino) {
   if(!shared || !export_online || export_result!=2 || dev!=shared->export_dev || ino!=shared->export_ino) return;
   for(unsigned i=0;i<tablesize;i++) {
-    struct value v; read_slot(&shared->slots[i],&v);
+    struct value v; if(!read_slot(&shared->slots[i],&v)) continue;
     if(v.len && v.len!=DELETED && v.revision<=export_revision) {
       memset(&v,0,sizeof(v)); v.len=DELETED; publish(&shared->slots[i],&v); shared->count--;
     }
@@ -84,7 +85,7 @@ void rbldnsd_overlay_retired(uint64_t dev,uint64_t ino) {
 int rbldnsd_overlay_query(const struct dataset *ds,const struct dnsqinfo *qi,struct dnspacket *pkt) {
   struct value v;
   if(!shared || ds!=target || !qi->qi_dnlab) return -1;
-  find(qi->qi_dn,qi->qi_dnlen0,&v);
+  if(find(qi->qi_dn,qi->qi_dnlen0,&v)==DELETED) return NSQUERY_SERVFAIL;
   if(!v.len) return -1;
   if(!v.rrlen) return 0; /* exact exclusion masks every wildcard */
   check_query_overwrites(qi);
@@ -126,14 +127,16 @@ static int export_snapshot(const char *path,int online) {
   if(!online) for(struct dsfile *f=target->ds_dsf;f;f=f->dsf_next)
     if(!strcmp(path,f->dsf_name) || (!stat(path,&out) && !stat(f->dsf_name,&src) && out.st_ino==src.st_ino && out.st_dev==src.st_dev)) return 0;
   struct value *copy=calloc(tablesize,sizeof(*copy)); if(!copy) return 0;
-  for(unsigned i=0;i<tablesize;i++) read_slot(&shared->slots[i],&copy[i]);
+  for(unsigned i=0;i<tablesize;i++) if(!read_slot(&shared->slots[i],&copy[i])) { free(copy); return 0; }
   pid_t pid=fork();
   if(pid<0) { free(copy); return 0; }
   if(!pid) {
     signal(SIGTERM,SIG_DFL); signal(SIGINT,SIG_DFL); signal(SIGHUP,SIG_DFL); signal(SIGALRM,SIG_DFL); alarm(60);
     long max=sysconf(_SC_OPEN_MAX); if(max<0) max=65536;
     for(int fd=3;fd<max;fd++) close(fd);
-    for(struct dsfile *f=target->ds_dsf;f;f=f->dsf_next) f->stat_ev=NULL;
+    for(struct dsfile *f=target->ds_dsf;f;f=f->dsf_next) {
+      f->stat_ev=NULL; f->dsf_stamp=0; f->dsf_size=-1;
+    }
     rbldnsd_snapshot_compiling=1;
     int ok=loaddataset(target,event_loop) && rbldnsd_snapshot_write_iter_ident(target,path,produce,copy,&shared->export_dev,&shared->export_ino);
     _exit(ok?0:1);
@@ -181,6 +184,7 @@ static int command(const char *command,char *out,size_t size) {
     v.rr[0]=a; v.rr[1]=b; v.rr[2]=c; v.rr[3]=d; strcpy(v.rr+4,txt); v.rrlen=5+strlen(txt);
   }
   unsigned i=find(v.name,v.len,&old);
+  if(i==DELETED) goto invalid;
   if(!old.len && shared->count==capacity) return snprintf(out,size,"{\"error\":\"overlay full; compact the snapshot\",\"revision\":%u}",shared->revision);
   if(shared->revision==UINT32_MAX) goto invalid;
   v.revision=shared->revision+1;
