@@ -1278,3 +1278,19 @@ contributions by Geoffrey T. Dairiki <dairiki@dairiki.org>.
 
 .SH LICENCE
 Mostly GPL, with some code licensed under 3-clause BSD license.
+.SH LOCAL CONTROL
+The option \fB-M path\fR enables an owner-only (0600) Unix datagram control
+socket, created after changing to the runtime user and chroot. Its parent
+directory must exist. An existing path is never overwritten. Clients bind a
+private Unix socket and send \fBstatus\fR, \fBstats\fR, \fBreload\fR, or
+\fBshutdown\fR, optionally newline-terminated. Replies are JSON datagrams
+(up to 16 KiB); commands are limited to 4095 bytes. Reload and shutdown replies
+acknowledge acceptance only. Worker lists contain at most eight entries; use
+\fBstats N\fR or \fBstatus N\fR with the returned next_slot until it is -1. Status includes generation and reload result.
+Counters include live worker identities, generated responses and lifetime totals
+across worker replacement; generated responses do not imply successful delivery.
+Transport availability flags distinguish unsupported counters from measured zero.
+Samples are approximate across concurrent updates. The daemon never blocks for
+a control client. Normal shutdown removes its socket; stale sockets after crashes
+require manual removal. With a single worker this option uses in-process reloads.
+The legacy per-zone \fB-s\fR output remains single-process only.

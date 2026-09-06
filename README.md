@@ -63,3 +63,47 @@ Run the process lifecycle tests with:
 ```sh
 RBLDNSD=/path/to/built/rbldnsd python3 test/pyunit/test_workers.py
 ```
+
+### Local control and worker accounting
+
+`-M /run/rbldnsd/control.sock` enables an owner-only (0600), nonblocking Unix
+**datagram** socket. The directory must already exist and be writable by the
+runtime user, within the chroot when used. Existing paths are never removed at
+startup. Normal shutdown removes only the socket inode created by this process;
+after a crash, remove the stale socket manually after verifying the daemon stopped.
+
+Commands are `status`, `stats`, `reload`, and `shutdown`, optionally followed by
+a newline. Replies are JSON datagrams. The client must bind its own private Unix
+socket path and receive a datagram up to 16 KiB. For example:
+
+```python
+import json, socket, tempfile
+with tempfile.TemporaryDirectory() as directory:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+        client.settimeout(3)
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
+        client.bind(directory + '/client')
+        client.sendto(b'stats', '/run/rbldnsd/control.sock')
+        print(json.loads(client.recv(16384)))
+```
+
+`status` and `stats` return the controller PID, published generation, last reload
+result/time, live worker identities and states, and per-worker and lifetime
+aggregate counters. At most eight workers appear per response; when `next_slot`
+is nonnegative, request `stats N` (or `status N`) using that slot number to
+continue. Totals cover all slots on every page. Totals survive worker replacement and crashes. Counters cover
+received datagrams/bytes, generated responses/bytes, response codes and unanswered
+queries. Generated responses are not proof of successful transmission. Delayed
+reply count/bytes are instantaneous gauges. `receive_drop_accounting` and
+`send_error_accounting` indicate whether their corresponding transport counters
+are available; unsupported counters must not be interpreted as measured zero.
+Rates can be calculated from successive samples. Samples are approximate across
+concurrent worker updates, not an atomic snapshot of all counters.
+
+Accounting lives in a fixed, separate shared mapping, with slots reused after
+workers are reaped. `-s` retains its existing single-process per-zone format and
+is still incompatible with `-W` greater than one; use JSON accounting instead.
+`-M` with `-W 1` uses in-process reloads. Reload/shutdown acknowledge command
+acceptance, not completion: poll status to observe the resulting generation or
+reload failure. Commands and responses never wait for a client to become writable;
+if a client loses a reply, it must inspect status before retrying a mutation.

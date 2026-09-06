@@ -25,6 +25,7 @@
 #include <sys/wait.h>
 #include "ev.h"
 #include "rbldnsd.h"
+#include "rbldnsd_control.h"
 #include "sds/sds.h"
 
 
@@ -132,13 +133,15 @@ static int fork_on_reload; /* >0 - perform fork on reloads, <0 - this is a child
 static int can_reload; /* block reload when another reload is there */
 static int pending_reload = 0;
 #define MAXWORKERS 128
+static char *control_path;
+static unsigned control_generation, control_next_generation;
 static int nworkers = 1, is_worker, worker_draining;
 static int worker_sockets[MAXWORKERS][MAXSOCK];
 static ev_io *worker_ios;
 static ev_child worker_reaper;
 static int worker_image_valid = 1, workers_started, worker_replace_pending;
 static int worker_ready_fd = -1;
-struct worker_process { pid_t pid; int control; ev_tstamp deadline; };
+struct worker_process { pid_t pid; int control; ev_tstamp deadline; int metrics; };
 static struct worker_process workers[MAXWORKERS], retiring[MAXWORKERS];
 static void check_expires(void);
 static void replace_workers(struct ev_loop *loop);
@@ -203,6 +206,7 @@ static void NORETURN usage(int exitcode) {
 " -c check - time interval to check for data file updates (1m)\n"
 " -p pidfile - write pid to specified file\n"
 " -n - do not become a daemon\n"
+" -M path - owner-only Unix datagram control socket (JSON replies)\n"
 " -W count - run 1..128 UDP workers with SO_REUSEPORT (default: 1)\n"
 " -f - fork a child process while reloading zones, to process requests\n"
 "  during reload (may double memory requiriments)\n"
@@ -592,8 +596,9 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
 
   if (argc <= 1) usage(1);
 
-  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:")) != EOF)
+  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:")) != EOF)
     switch(c) {
+    case 'M': control_path = optarg; break;
     case 'W': {
       char *end;
       long count = strtol(optarg, &end, 10);
@@ -1174,10 +1179,12 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
   ds = nextdataset2reload(NULL);
   if (!ds && call_hook(reload_check, (zonelist)) == 0) {
     check_expires();
+    rbldnsd_control_reload(1);
     return 1;	/* nothing to reload */
   }
 
-  if (nworkers > 1) do_fork = 0;
+  if (nworkers > 1 || control_path) do_fork = 0;
+  rbldnsd_control_reload(-1);
 
   if (do_fork) {
     int pfd[2];
@@ -1312,6 +1319,8 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
     }
   }
 
+  rbldnsd_control_reload(r);
+  if (r && nworkers == 1 && control_path) rbldnsd_control_generation(++control_generation);
   if (nworkers > 1 && workers_started) {
     worker_image_valid = r;
     if (r) replace_workers(loop);
@@ -1424,6 +1433,7 @@ static void delayed_timer_cb(struct ev_loop *loop, ev_timer *w, int revents) {
     }
   }
 
+  rbldnsd_control_backlog(delayed_heap_len, delayed_bytes);
   delayed_schedule_timer(loop);
   if (worker_draining && !delayed_heap_len) ev_break(loop, EVBREAK_ALL);
 }
@@ -1473,6 +1483,7 @@ static int delayed_push(int fd, const struct sockaddr *peer, socklen_t peerlen,
   delayed_bytes += len;
   delayed_sift_up(delayed_heap_len);
   delayed_heap_len++;
+  rbldnsd_control_backlog(delayed_heap_len, delayed_bytes);
 
   delayed_schedule_timer(delayed_loop);
   return 1;
@@ -1528,6 +1539,7 @@ static int request(int fd) {
     pkt[i].p_peer = MSG_FIELD(msg[i], msg_name);
     pkt[i].p_delay_ms = 0;
     replies_lengths[i] = replypacket(&pkt[i], q, zonelist, &qi);
+    rbldnsd_control_query(q, replies_lengths[i], replies_lengths[i] > 0 ? pkt[i].p_buf[3] & 15 : 0);
 
     if (flog) {
       logreply(&pkt[i], flog, flushlog, &qi, replies_lengths[i]);
@@ -1806,6 +1818,7 @@ static void worker_drain_timeout(struct ev_loop *loop, ev_timer *w, int revents)
 static void worker_shutdown(struct ev_loop *loop) {
   if (worker_draining) return;
   worker_draining = 1;
+  rbldnsd_control_draining();
   for (int i = 0; i < numsock; ++i) ev_io_stop(loop, &worker_ios[i]);
   if (!delayed_heap_len) ev_break(loop, EVBREAK_ALL);
   else {
@@ -1823,10 +1836,12 @@ static void worker_control(struct ev_loop *loop, ev_io *w, int revents) {
   }
 }
 
-static void run_worker(int slot, int control) {
+static void run_worker(int slot, int control, int metrics) {
   struct ev_loop *loop;
   ev_io ctl;
   is_worker = 1;
+  rbldnsd_control_child();
+  rbldnsd_control_worker(metrics);
   if (worker_ready_fd >= 0) close(worker_ready_fd);
   can_reload = 0;
   fork_on_reload = 0;
@@ -1883,13 +1898,14 @@ static int spawn_worker(int slot) {
   char ready;
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) return 0;
   if (flog) fflush(flog);
+  int metrics = rbldnsd_control_slot_alloc(control_next_generation ? control_next_generation : control_generation);
   pid = fork();
   if (pid == 0) {
     close(pair[0]);
-    run_worker(slot, pair[1]);
+    run_worker(slot, pair[1], metrics);
   }
   close(pair[1]);
-  if (pid < 0) { close(pair[0]); return 0; }
+  if (pid < 0) { close(pair[0]); rbldnsd_control_release(metrics); return 0; }
   /* Startup is bounded even if a child stalls before entering its loop. */
   struct pollfd pfd = { pair[0], POLLIN, 0 };
   int r;
@@ -1898,8 +1914,10 @@ static int spawn_worker(int slot) {
     close(pair[0]);
     kill(pid, SIGKILL);
     while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    rbldnsd_control_release(metrics);
     return 0;
   }
+  workers[slot].metrics = metrics;
   workers[slot].pid = pid;
   workers[slot].control = pair[0];
   dslog(LOG_INFO, 0, "worker %d ready (slot %d)", (int)pid, slot);
@@ -1909,6 +1927,7 @@ static int spawn_worker(int slot) {
 static void replace_workers(struct ev_loop *loop) {
   int i;
   can_reload = 0;
+  control_next_generation = control_generation + 1;
   memcpy(retiring, workers, sizeof(workers));
   memset(workers, 0, sizeof(workers));
   for (i = 0; i < nworkers; ++i) {
@@ -1918,17 +1937,21 @@ static void replace_workers(struct ev_loop *loop) {
         close(workers[j].control);
         kill(workers[j].pid, SIGKILL);
         while (waitpid(workers[j].pid, NULL, 0) < 0 && errno == EINTR) {}
+        rbldnsd_control_release(workers[j].metrics);
       }
       memcpy(workers, retiring, sizeof(workers));
       memset(retiring, 0, sizeof(retiring));
       can_reload = 1;
       if (!workers_started) error(0, "unable to start workers");
+      control_next_generation = 0;
       worker_replace_pending = 1;
       return;
     }
   }
   worker_replace_pending = 0;
   workers_started = 1;
+  rbldnsd_control_generation(++control_generation);
+  control_next_generation = 0;
   for (i = 0; i < nworkers; ++i)
     if (retiring[i].pid) {
       /* shutdown sends EOF without releasing the descriptor until reaped. */
@@ -1945,6 +1968,7 @@ static void worker_exited(struct ev_loop *loop, ev_child *w, int revents) {
       if (p->pid == w->rpid) {
         dslog(LOG_INFO, 0, "worker %d exited (status %x)", (int)p->pid, w->rstatus);
         close(p->control);
+        rbldnsd_control_release(p->metrics);
         p->pid = 0;
       }
     }
@@ -1990,6 +2014,11 @@ static void worker_supervise(struct ev_loop *loop, ev_timer *w, int revents) {
  * End of signal handlers
  */
 
+static void control_action(int action) {
+  /* Queue via existing signal watchers: response is sent before mutation. */
+  kill(getpid(), action == 1 ? SIGHUP : SIGTERM);
+}
+
 int main(int argc, char **argv) {
   struct ev_loop *loop;
   ev_io *io_evs = NULL; /* Events for sockets */
@@ -2022,6 +2051,13 @@ int main(int argc, char **argv) {
   if (statsfile)
     dumpstats_z();
 #endif
+
+  if (rbldnsd_control_init(loop, control_path, control_action) < 0)
+    error(errno, "cannot create control socket");
+  if (nworkers == 1) {
+    rbldnsd_control_worker(rbldnsd_control_slot_alloc(1));
+    rbldnsd_control_generation(control_generation = 1);
+  }
 
   static ev_timer supervisor_timer;
   if (nworkers > 1) {
@@ -2112,6 +2148,7 @@ int main(int argc, char **argv) {
     close (update_sock);
   }
 
+  rbldnsd_control_close();
   free(io_evs);
   free(stat_evs);
 

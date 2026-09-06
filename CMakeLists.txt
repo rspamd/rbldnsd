@@ -77,6 +77,7 @@ add_executable(rbldnsd
         istream.c
         mempool.c
         rbldnsd.c
+        rbldnsd_control.c
         rbldnsd_acl.c
         rbldnsd_aclkey.c
         rbldnsd_combined.c
