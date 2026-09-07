@@ -8,9 +8,6 @@ struct generation_stamp {
   time_t stamp;
   off_t size;
 };
-struct generation_base {
-  uint64_t dev, ino;
-};
 struct generation_zone {
   time_t stamp, expires;
 };
@@ -18,13 +15,15 @@ struct generation_process {
   pid_t guardian, owner;
   int fd, life, state;
   unsigned long id;
-  struct generation_base base;
+  struct rbldnsd_overlay_identity *bases;
+  unsigned base_count;
   ev_tstamp deadline;
   unsigned char *message;
   size_t used;
 };
 static struct generation_process generation_active, generation_candidate, generation_retiring;
 static size_t generation_message_size;
+static unsigned generation_base_count;
 static int generation_ever_active, generation_startup_failed;
 
 static int generation_write(int fd, const void *data, size_t length) {
@@ -116,10 +115,18 @@ static void generation_owner(int fd) {
     }
   }
 
-  struct generation_base base;
-  rbldnsd_overlay_base_identity(&base.dev, &base.ino);
-  if (!generation_write(fd, &base, sizeof(base))) {
-    _exit(1);
+  struct rbldnsd_overlay_identity *bases = NULL;
+  if (generation_base_count) {
+    bases = calloc(generation_base_count, sizeof(*bases));
+    if (!bases) {
+      _exit(1);
+    }
+    rbldnsd_overlay_base_identities(bases, generation_base_count);
+    if (!generation_write(fd, bases, generation_base_count * sizeof(*bases))) {
+      free(bases);
+      _exit(1);
+    }
+    free(bases);
   }
 
   char command;
@@ -292,16 +299,31 @@ static int generation_start(struct ev_loop *loop) {
     return 1;
   }
   if (!generation_message_size) {
-    generation_message_size = sizeof(pid_t) + sizeof(struct generation_base);
+    size_t count = rbldnsd_overlay_target_count();
+    if (count > (SIZE_MAX - sizeof(pid_t)) / sizeof(struct rbldnsd_overlay_identity)) {
+      errno = EOVERFLOW;
+      return 0;
+    }
+    size_t message_size = sizeof(pid_t) + count * sizeof(struct rbldnsd_overlay_identity);
     struct dataset *dataset = NULL;
     while ((dataset = nextdataset(dataset)) != NULL) {
       for (struct dsfile *file = dataset->ds_dsf; file; file = file->dsf_next) {
-        generation_message_size += sizeof(struct generation_stamp);
+        if (message_size > SIZE_MAX - sizeof(struct generation_stamp)) {
+          errno = EOVERFLOW;
+          return 0;
+        }
+        message_size += sizeof(struct generation_stamp);
       }
     }
     for (struct zone *zone = zonelist; zone; zone = zone->z_next) {
-      generation_message_size += sizeof(struct generation_zone);
+      if (message_size > SIZE_MAX - sizeof(struct generation_zone)) {
+        errno = EOVERFLOW;
+        return 0;
+      }
+      message_size += sizeof(struct generation_zone);
     }
+    generation_message_size = message_size;
+    generation_base_count = (unsigned)count;
   }
 
   int pair[2], life[2];
@@ -315,7 +337,13 @@ static int generation_start(struct ev_loop *loop) {
   }
 
   unsigned char *message = malloc(generation_message_size);
-  if (!message) {
+  struct rbldnsd_overlay_identity *bases = NULL;
+  if (generation_base_count) {
+    bases = calloc(generation_base_count, sizeof(*bases));
+  }
+  if (!message || (generation_base_count && !bases)) {
+    free(message);
+    free(bases);
     close(pair[0]);
     close(pair[1]);
     close(life[0]);
@@ -331,6 +359,9 @@ static int generation_start(struct ev_loop *loop) {
     close(pair[0]);
     close(life[0]);
 
+    free(message);
+    free(bases);
+
     /* Every descendant retains life[1]. EOF proves all generation writers
      * have exited, including orphaned workers after a guardian crash. */
     generation_guardian(pair[1]);
@@ -342,12 +373,15 @@ static int generation_start(struct ev_loop *loop) {
     close(pair[0]);
     close(life[0]);
     free(message);
+    free(bases);
     return 0;
   }
   generation_candidate = (struct generation_process){.guardian = pid,
                                                      .fd = pair[0],
                                                      .life = life[0],
                                                      .message = message,
+                                                     .bases = bases,
+                                                     .base_count = generation_base_count,
                                                      .id = generation_id,
                                                      .deadline = ev_time() + generation_timeout};
   make_socket_nonblocking(pair[0]);
@@ -419,6 +453,7 @@ static void generation_collect(void) {
     }
     close(generation->life);
     rbldnsd_control_release_generation_dead((unsigned)generation->id);
+    free(generation->bases);
     memset(generation, 0, sizeof(*generation));
   }
 }
@@ -475,7 +510,9 @@ static void generation_supervise(struct ev_loop *loop, ev_timer *w, int revents)
           zone->z_stamp = state.stamp;
           zone->z_expires = state.expires;
         }
-        memcpy(&generation->base, cursor, sizeof(generation->base));
+        if (generation->base_count) {
+          memcpy(generation->bases, cursor, generation->base_count * sizeof(*generation->bases));
+        }
         free(generation->message);
         generation->message = NULL;
         generation_retiring = generation_active;
@@ -497,7 +534,7 @@ static void generation_supervise(struct ev_loop *loop, ev_timer *w, int revents)
     }
   }
   if (generation_active.guardian && !generation_retiring.id) {
-    rbldnsd_overlay_retired(generation_active.base.dev, generation_active.base.ino);
+    rbldnsd_overlay_retired(generation_active.bases, generation_active.base_count);
   }
   can_reload = !generation_candidate.id && !generation_retiring.id &&
                (!generation_active.id || generation_active.guardian);
@@ -526,6 +563,16 @@ static void generation_shutdown(void) {
       kill(-generation->owner, SIGKILL);
     }
     close(generation->fd);
+  }
+
+  for (unsigned i = 0; i < 3; ++i) {
+    struct generation_process *generation = generations[i];
+    if (generation->id) {
+      close(generation->life);
+    }
+    free(generation->message);
+    free(generation->bases);
+    memset(generation, 0, sizeof(*generation));
   }
 
   for (int i = 1; i < nworkers; ++i) {
