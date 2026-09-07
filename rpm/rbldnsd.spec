@@ -3,7 +3,7 @@
 %global rbldnshome %{_localstatedir}/lib/rbldns
 
 Name:           rbldnsd
-Version:        1.0.3
+Version:        1.1.0
 Release:        1%{?dist}
 Summary:        Small fast daemon to serve DNSBLs
 License:        GPL-2.0-or-later
@@ -79,5 +79,11 @@ exit 0
 %attr(0755, root, root) %dir %{rbldnshome}
 
 %changelog
+* Mon Sep 07 2026 rbldnsd maintainers <vsevolod@rspamd.com> - 1.1.0-1
+ - Add transactional reloads, local control and shared metrics, compiled
+   domain snapshots, bounded UDP sends, and shared customer quotas.
+ - Add independent domain overlays with revision checks and online compaction
+   across multiple datasets and zones.
+
 * Mon Dec 16 2024 rbldnsd maintainers <vsevolod@rspamd.com> - 1.0.0-1
  - Initial RPM spec for EL8+

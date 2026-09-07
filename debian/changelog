@@ -1,3 +1,18 @@
+rbldnsd (1.1.0-1) unstable; urgency=medium
+
+  * Add local control and shared metrics (-M), transactional multiworker
+    reloads with loader deadlines (-T), and immutable generation owners.
+  * Add compiled domain snapshots (-B and dnsnapshot), bounded UDP sends,
+    receive-drop accounting, and shared customer quotas (-R).
+  * Add independent domain overlays (-O) across datasets and zones, with
+    target discovery, revision checks, exclusions, and online compaction.
+  * Preserve newer updates during compaction and reclaim entries only after
+    the matching base is active and older workers have exited.
+  * Fix same-second compaction reloads and inherited compiler descriptors;
+    expand lifecycle, accounting, snapshot, and multi-zone regression tests.
+
+ -- rbldnsd maintainers <vsevolod@rspamd.com>  Mon, 07 Sep 2026 09:16:54 +0000
+
 rbldnsd (1.0.3-1) unstable; urgency=medium
 
   * Add SO_REUSEPORT UDP workers with copy-on-write zone sharing (-W).
