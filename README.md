@@ -15,7 +15,7 @@ Main changes from the original source:
 * **Compiled Domain Snapshots**: the `-B` compiler produces portable `dnsnapshot` datasets served through read-only memory mappings, preserving domain answers, wildcards, exclusions, and metadata. See [snapshot documentation](README.snapshot.md).
 * **Bounded UDP Sends and Drop Accounting**: partial batches and send failures are handled without busy retry loops. Shared counters track discarded replies and, on Linux, socket receive-queue overflow.
 * **Shared Customer Quotas**: `-R` limits requests by authenticated ACL key, source prefix, or zone. Bounded shared accounting preserves quota debt across workers, reloads, and crashes. See [the manual](rbldnsd.8).
-* **Incremental Domain Updates**: `-O` adds bounded shared overlays with revision-checked additions and exclusions for one domain dataset. Online `dnsnapshot` compaction persists updates and reclaims overlay capacity while queries continue. Updates remain ephemeral until compacted. See [overlay documentation](README.overlay.md).
+* **Incremental Domain Updates**: `-O` adds a bounded shared overlay to each configured top-level `dnhash` and `dnsnapshot` dataset, with independent revisions, additions, exclusions, and compaction. Updates target a dataset explicitly; zones backed by the same dataset share its updates. Online `dnsnapshot` compaction persists updates and reclaims overlay capacity while queries continue. Updates remain ephemeral until compacted. See [overlay documentation](README.overlay.md).
 
 This project has been supported by [Abusix](https://abusix.com/).
 

@@ -1493,10 +1493,20 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 
   if (nworkers == 1) {
     rbldnsd_control_reload(r);
-    if (r) {
-      uint64_t dev, ino;
-      rbldnsd_overlay_base_identity(&dev, &ino);
-      rbldnsd_overlay_retired(dev, ino);
+    if (r && rbldnsd_overlay_target_count() > 0) {
+      unsigned count = rbldnsd_overlay_target_count();
+      struct rbldnsd_overlay_identity *identities;
+
+      identities = calloc(count, sizeof(*identities));
+      if (identities) {
+        rbldnsd_overlay_base_identities(identities, count);
+        rbldnsd_overlay_retired(identities, count);
+        free(identities);
+      }
+      else {
+        dslog(LOG_WARNING, 0, "cannot reclaim overlay entries: %s",
+              strerror(errno));
+      }
     }
     if (r && control_path) {
       rbldnsd_control_generation(++control_generation);
@@ -2340,8 +2350,8 @@ int main(int argc, char **argv) {
   if (overlay_capacity && !control_path) {
     error(0, "-O requires -M");
   }
-  if (rbldnsd_overlay_init(loop, overlay_capacity, control_action) < 0) {
-    error(errno, "cannot initialize domain overlay (requires exactly one domain dataset)");
+  if (rbldnsd_overlay_init(loop, overlay_capacity, control_action, zonelist) < 0) {
+    error(errno, "cannot initialize domain overlays");
   }
 
   if (rbldnsd_control_init(loop, control_path, control_action) < 0) {
