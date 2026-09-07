@@ -403,7 +403,7 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
   }
 
   if (!rbldnsd_ratelimit_check(pkt->p_peer, zone->z_name,
-      (qi->qi_tflag & NSQUERY_KEY) ? qi->qi_additional : NULL)) {
+                               (qi->qi_tflag & NSQUERY_KEY) ? qi->qi_additional : NULL)) {
     rbldnsd_control_rate_limited();
     do_stats(gstats.q_dropped += 1);
     return 0;
@@ -433,7 +433,9 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
   for(dsl = zone->z_dsl; dsl; dsl = dsl->dsl_next)
     found |= dsl->dsl_queryfn(dsl->dsl_ds, qi, pkt);
 
-  if (found & NSQUERY_SERVFAIL) refuse(DNS_R_SERVFAIL);
+  if (found & NSQUERY_SERVFAIL) {
+    refuse(DNS_R_SERVFAIL);
+  }
 
   if (found & NSQUERY_ADDPEER) {
 #ifdef NO_IPv6

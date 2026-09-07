@@ -387,7 +387,9 @@ readdslines(struct istream *sp, struct dataset *ds, struct dsctx *dsc) {
   }
   if (r < 0)
     return -1;
-  if (noeol && rbldnsd_snapshot_compiling) return 0;
+  if (noeol && rbldnsd_snapshot_compiling) {
+    return 0;
+  }
   if (noeol)
     dslog(LOG_WARNING, dsc, "incomplete last line (ignored)");
   return 1;
@@ -430,10 +432,15 @@ int loaddataset(struct dataset *ds, struct ev_loop *loop) {
     if (isdstype(ds->ds_type, dnsnapshot)) {
       r = !dsf->dsf_next && dsf == ds->ds_dsf && rbldnsd_snapshot_load(ds, fd, &dsc);
       close(fd);
-      if (!r) goto fail;
-      dsf->dsf_stamp = st0.st_mtime; dsf->dsf_size = st0.st_size;
+      if (!r) {
+        goto fail;
+      }
+      dsf->dsf_stamp = st0.st_mtime;
+      dsf->dsf_size = st0.st_size;
       stamp = ds->ds_stamp;
-      if (dsf->stat_ev) ev_stat_stat(loop, dsf->stat_ev);
+      if (dsf->stat_ev) {
+        ev_stat_stat(loop, dsf->stat_ev);
+      }
       continue;
     }
     istream_init_fd(&is, fd);
@@ -484,7 +491,9 @@ int loaddataset(struct dataset *ds, struct ev_loop *loop) {
       ev_stat_stat(loop, dsf->stat_ev);
     }
   }
-  if (rbldnsd_snapshot_compiling && dsc.dsc_warns) goto fail;
+  if (rbldnsd_snapshot_compiling && dsc.dsc_warns) {
+    goto fail;
+  }
   ds->ds_stamp = stamp;
   dsc.dsc_fname = NULL;
 
