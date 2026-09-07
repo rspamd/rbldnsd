@@ -96,14 +96,17 @@ param :7:params $ @ require_key=1
                     self.assertEqual(self.query(a, name, qt), self.query(b, name, qt))
 
     def test_atomic_reload_and_readonly_mapping(self):
+        from test_workers import alive, children, eventually
+
         proc, port = self.start('dnsnapshot', self.snap, 3)
+        old_workers = children(proc.pid)
+        self.assertEqual(len(old_workers), 3)
         before = self.query(port, 'listed')
         if pathlib.Path('/proc').exists():
             maps = pathlib.Path('/proc', str(proc.pid), 'maps').read_text().splitlines()
             # The stable controller keeps metadata only. Immutable mappings
             # belong to the generation owner and its query workers.
             self.assertFalse([x for x in maps if str(self.snap) in x])
-            from test_workers import children
             workers = children(proc.pid)
             self.assertEqual(len(workers), 3)
             for pid in workers:
@@ -122,6 +125,9 @@ param :7:params $ @ require_key=1
                 break
             time.sleep(.02)
         self.assertIn(b'NEW', reply)
+        # A new worker can answer before old workers finish their graceful
+        # retirement. Wait for that boundary before requiring only new data.
+        eventually(lambda: not any(alive(pid) for pid in old_workers))
         self.snap.unlink()
         self.assertIn(b'NEW', self.query(port, 'listed'))
 
