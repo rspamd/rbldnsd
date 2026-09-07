@@ -250,6 +250,55 @@ class MultiZoneOverlay(unittest.TestCase):
         self.assert_answer(restarted, 'listed.alpha.test', 'ALPHA-EXPORTED')
         self.assert_answer(restarted, 'listed.beta.test', 'BETA-EXPORTED')
 
+    def test_concurrent_target_compactions_keep_newer_mutations(self):
+        for workers in (1, 3):
+            with self.subTest(workers=workers):
+                a = self.source(f'parallel-a{workers}', 'listed :2:ALPHA-BASE\n')
+                b = self.source(f'parallel-b{workers}', 'listed :3:BETA-BASE\n')
+                a_snap = self.root / f'parallel-a{workers}.snapshot'
+                b_snap = self.root / f'parallel-b{workers}.snapshot'
+                self.compile_snapshot(a, a_snap)
+                self.compile_snapshot(b, b_snap)
+                specs = [f'alpha.test:dnsnapshot:{a_snap}', f'beta.test:dnsnapshot:{b_snap}']
+                _, port = self.start(specs, workers, capacity=3)
+                first, second = self.target_for(a_snap), self.target_for(b_snap)
+                self.put(first, 0, 'listed', 'ALPHA-CHECKPOINT')
+                self.put(second, 0, 'listed', 'BETA-CHECKPOINT')
+                self.put(first, 1, 'checkpoint-only', 'ALPHA-CHECKPOINT-ONLY')
+                self.put(second, 1, 'checkpoint-only', 'BETA-CHECKPOINT-ONLY')
+                # Submit both captured revisions before waiting for either job.
+                self.assertTrue(self.command(f'overlay-compact @{first} 2')['accepted'])
+                self.assertTrue(self.command(f'overlay-compact @{second} 2')['accepted'])
+                self.put(first, 2, 'listed', 'ALPHA-AFTER-CHECKPOINT')
+                self.put(second, 2, 'listed', 'BETA-AFTER-CHECKPOINT')
+                self.put(first, 3, 'fresh', 'ALPHA-NEWER-ENTRY')
+                self.put(second, 3, 'fresh', 'BETA-NEWER-ENTRY')
+                self.wait(lambda: all(not self.status(target)['compaction_pending']
+                                      for target in (first, second)))
+                for target in (first, second):
+                    status = self.status(target)
+                    self.assertEqual(status['export_state'], 'success')
+                    self.assertEqual(status['revision'], 4)
+                    self.assertEqual(status['entries'], 2)
+                for _ in range(20):
+                    self.assert_answer(port, 'listed.alpha.test', 'ALPHA-AFTER-CHECKPOINT')
+                    self.assert_answer(port, 'listed.beta.test', 'BETA-AFTER-CHECKPOINT')
+                    self.assert_answer(port, 'fresh.alpha.test', 'ALPHA-NEWER-ENTRY')
+                    self.assert_answer(port, 'fresh.beta.test', 'BETA-NEWER-ENTRY')
+                self.assert_answer(port, 'checkpoint-only.alpha.test', 'ALPHA-CHECKPOINT-ONLY')
+                self.assert_answer(port, 'checkpoint-only.beta.test', 'BETA-CHECKPOINT-ONLY')
+                # Disk publications contain each target's R=2 checkpoint only;
+                # both targets' R>2 mutations remain exclusively in the overlay.
+                _, restarted = self.start(specs, workers=1)
+                self.assert_answer(restarted, 'listed.alpha.test', 'ALPHA-CHECKPOINT')
+                self.assert_answer(restarted, 'listed.beta.test', 'BETA-CHECKPOINT')
+                self.assert_answer(restarted, 'checkpoint-only.alpha.test', 'ALPHA-CHECKPOINT-ONLY')
+                self.assert_answer(restarted, 'checkpoint-only.beta.test', 'BETA-CHECKPOINT-ONLY')
+                for zone in ('alpha.test', 'beta.test'):
+                    missing = self.query(restarted, 'fresh.' + zone)
+                    self.assertEqual(missing[3] & 15, 3)
+                    self.assertEqual(int.from_bytes(missing[6:8], 'big'), 0)
+
     def test_targeted_compaction_reload_and_restart(self):
         for workers in (1, 3):
             with self.subTest(workers=workers):
