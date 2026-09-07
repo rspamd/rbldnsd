@@ -39,7 +39,6 @@ struct acl_key {
   const unsigned char *ldn;
 };
 struct acl_val {
-  uint64_t requests;
   const char *rr;
 };
 
@@ -211,7 +210,6 @@ ds_aclkey_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   }
 
   nval = &kh_value(dsd->auth_keys, k);
-  nval->requests = 0;
   nval->rr = rr;
 
   return 1;
@@ -260,7 +258,6 @@ int ds_aclkey_query(const struct dataset *ds, struct dnsqinfo *qi,
         struct acl_val *val = &kh_value(ds->ds_dsd->auth_keys, k);
 
         rr = val->rr;
-        val->requests++;
 
         /* Also modify qi */
         qi->qi_dnlab--;

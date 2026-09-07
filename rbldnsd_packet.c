@@ -11,6 +11,8 @@
 #include <netdb.h>
 #include <syslog.h>
 #include "rbldnsd.h"
+#include "rbldnsd_ratelimit.h"
+#include "rbldnsd_control.h"
 #include "dns_simd.h"
 
 #ifndef NO_IPv6
@@ -362,6 +364,7 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
   /* check global ACL key, we can do it merely after zone data has been parsed */
   if (g_dsaclkey && g_dsaclkey->ds_stamp) {
     found = ds_aclkey_query(g_dsaclkey, qi, pkt);
+    qi->qi_tflag |= found;
     if (found & NSQUERY_IGNORE) {
       do_stats(gstats.q_dropped += 1; gstats.b_in += qlen);
       return 0;
@@ -399,6 +402,13 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
     refuse(DNS_R_REFUSED);
   }
 
+  if (!rbldnsd_ratelimit_check(pkt->p_peer, zone->z_name,
+                               (qi->qi_tflag & NSQUERY_KEY) ? qi->qi_additional : NULL)) {
+    rbldnsd_control_rate_limited();
+    do_stats(gstats.q_dropped += 1);
+    return 0;
+  }
+
   if (qi->qi_dnlab == 0) {	/* query to base zone: SOA and NS */
 
     found = NSQUERY_FOUND;
@@ -422,6 +432,10 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
   /* search the datasets */
   for(dsl = zone->z_dsl; dsl; dsl = dsl->dsl_next)
     found |= dsl->dsl_queryfn(dsl->dsl_ds, qi, pkt);
+
+  if (found & NSQUERY_SERVFAIL) {
+    refuse(DNS_R_SERVFAIL);
+  }
 
   if (found & NSQUERY_ADDPEER) {
 #ifdef NO_IPv6

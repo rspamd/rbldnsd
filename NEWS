@@ -1,6 +1,34 @@
 This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
+1.1.0 (07 Sep 2026)
+ - Add an owner-only Unix datagram control socket (-M) for JSON status,
+   aggregate and per-worker metrics, reload, and shutdown.
+ - Make multiworker reloads transactional: isolated loaders prepare immutable
+   replacement generations with a configurable deadline (-T). Failed loads
+   retain known-good service; worker respawns share the active image via CoW.
+   Keep the controller free of zone contents and reclaim retired generations,
+   including when datasets shrink or generation processes crash.
+ - Add an offline domain snapshot compiler (-B) and validated dnsnapshot
+   datasets served through read-only memory mappings.
+ - Bound UDP send retries and account for discarded replies, partial batches,
+   and Linux receive-queue overflow across worker generations.
+ - Add optional shared customer quotas (-R) for authenticated ACL keys, source
+   prefixes, and zones. Quota debt survives worker reloads and crashes.
+ - Add bounded exact-domain overlays (-O) for each configured top-level dnhash
+   and dnsnapshot dataset. Discover targets with overlay-list and select them
+   with @ID; revisions and capacity are independent per dataset, while zones
+   sharing a dataset share its overlay. Other dataset types can coexist.
+ - Support online snapshot compaction while queries and updates continue.
+   Reclaim checkpoint entries only after the matching base is active and old
+   workers have exited; preserve newer updates and independent target state.
+   Updates remain ephemeral until compacted. Dynamic combined subdatasets are
+   not overlay targets, and online compaction requires dnsnapshot.
+ - Fix compaction reloads for equal-size publications within the same second
+   and prevent compiler children from retaining daemon lifecycle descriptors.
+ - Expand regression coverage for generation failures, shared accounting,
+   snapshots, multi-zone overlays, concurrent compaction, and daemon shutdown.
+
 1.0.3 (05 Sep 2026)
  - Add -W worker-count support with separate SO_REUSEPORT UDP sockets,
    bound before privilege dropping, and copy-on-write sharing of zone data.

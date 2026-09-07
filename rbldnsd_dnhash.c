@@ -33,6 +33,7 @@
 #include "dns_hash.h"
 
 #include "rbldnsd.h"
+#include "rbldnsd_overlay.h"
 
 struct key {
   unsigned len;
@@ -462,6 +463,10 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
   khiter_t k;
   struct key srch, *pkey;
 
+  int overlay = rbldnsd_overlay_query(ds, qi, pkt);
+  if (overlay >= 0) {
+    return overlay;
+  }
   if (!qlab) return 0;		/* do not match empty dn */
   check_query_overwrites(qi);
 
@@ -592,3 +597,33 @@ ds_dnhash_dump(const struct dataset *ds,
 }
 
 #endif
+
+#include "rbldnsd_snapshot.h"
+
+int rbldnsd_dnhash_foreach(const struct dataset *ds, snapshot_visit_fn *visit, void *arg) {
+  const struct dsdata *d = ds->ds_dsd;
+  for (unsigned t = 0; t <= MAX_WILDCARD; t++) {
+    khash_t(dnhash) *h = t ? d->wild[t - 1] : d->direct;
+    for (khiter_t k = kh_begin(h); k != kh_end(h); k++) {
+      if (kh_exist(h, k)) {
+        struct snapshot_entry e;
+        e.name = kh_key(h, k).ldn;
+        e.namelen = kh_key(h, k).len;
+        e.table = t;
+        e.rr = kh_val(h, k).rr;
+        const struct kv_params *p = kh_val(h, k).params;
+        e.nparams = p ? p->n : 0;
+        if (e.nparams > SNAPSHOT_MAX_PARAMS) {
+          return 0;
+        }
+        if (e.nparams) {
+          memcpy(e.params, p->kv, e.nparams * sizeof(e.params[0]));
+        }
+        if (!visit(&e, arg)) {
+          return 0;
+        }
+      }
+    }
+  }
+  return 1;
+}

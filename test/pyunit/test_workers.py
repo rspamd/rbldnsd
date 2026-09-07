@@ -18,12 +18,24 @@ import unittest
 BINARY = os.environ.get('RBLDNSD', './rbldnsd')
 
 
-def children(pid):
+def direct_children(pid):
     result = subprocess.run(['ps', '-axo', 'pid=,ppid=,stat='],
                             text=True, capture_output=True, check=True)
     return {int(p) for p, parent, state in
             (line.split() for line in result.stdout.splitlines())
             if int(parent) == pid and not state.startswith('Z')}
+
+
+def children(pid):
+    """Query workers are children of an owner below a guardian."""
+    return {worker for guardian in direct_children(pid)
+            for owner in direct_children(guardian)
+            for worker in direct_children(owner)}
+
+
+def descendants(pid):
+    result = direct_children(pid)
+    return result | {p for child in result for p in descendants(child)}
 
 
 def alive(pid):
@@ -66,7 +78,7 @@ class Workers(unittest.TestCase):
         self.proc = subprocess.Popen(args, stdout=self.log, stderr=self.log)
         eventually(lambda: len(children(self.proc.pid)) == count if count > 1
                    else self.proc.poll() is None)
-        self.known |= children(self.proc.pid)
+        self.known |= descendants(self.proc.pid)
         eventually(lambda: self.query() == b'OLD')
 
     def query(self, name='listed', sock=None, host='127.0.0.1'):
@@ -101,7 +113,7 @@ class Workers(unittest.TestCase):
 
     def generation(self):
         pids = children(self.proc.pid)
-        self.known |= pids
+        self.known |= descendants(self.proc.pid)
         return pids
 
     def test_reload_failure_recovery_and_crash(self):
@@ -211,13 +223,13 @@ class Workers(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         pid = int(pidfile.read_text())
         try:
-            self.known |= children(pid)
-            self.assertEqual(len(self.known), 3)
+            self.known |= descendants(pid)
+            self.assertEqual(len(children(pid)), 3)
             self.assertEqual(self.query(), b'OLD')
             self.write_zone('DAEMON')
             os.kill(pid, signal.SIGHUP)
             eventually(lambda: self.query() == b'DAEMON')
-            self.known |= children(pid)
+            self.known |= descendants(pid)
         finally:
             os.kill(pid, signal.SIGTERM)
             eventually(lambda: not alive(pid))
@@ -274,6 +286,89 @@ class Workers(unittest.TestCase):
         reloaded_pages = verify_generation(self.generation())
         print(f'CoW shared/private dirty KiB: initial={initial_pages}; reloaded={reloaded_pages}')
 
+    def pending_loader(self, active_guardians):
+        candidates = direct_children(self.proc.pid) - active_guardians
+        for guardian in candidates:
+            owners = direct_children(guardian)
+            if owners:
+                self.known |= {guardian} | owners
+                return next(iter(owners))
+        return None
+
+    def block_reload(self):
+        guardians = direct_children(self.proc.pid)
+        self.zone.unlink()
+        os.mkfifo(self.zone)
+        self.proc.send_signal(signal.SIGHUP)
+        eventually(lambda: self.pending_loader(guardians))
+        return self.pending_loader(guardians)
+
+    def test_failed_candidate_preserves_respawn_image(self):
+        secondary = pathlib.Path(self.tmp.name) / 'secondary'
+        secondary.write_text('other SECOND\n')
+        self.start(extra=('example.test:dnhash:' + str(secondary),))
+        old = self.generation()
+        self.write_zone('UNCOMMITTED')
+        secondary.unlink()
+        self.proc.send_signal(signal.SIGHUP)
+        time.sleep(.3)
+        victim = next(iter(old))
+        os.kill(victim, signal.SIGKILL)
+        eventually(lambda: len(self.generation()) == 3 and victim not in self.generation())
+        for _ in range(20):
+            self.assertEqual(self.query(), b'OLD')
+
+    def test_loader_crash_retains_service_and_recovers(self):
+        self.start(extra=('-T', '3'))
+        old = self.generation()
+        loader = self.block_reload()
+        self.assertEqual(self.query(), b'OLD')
+        os.kill(loader, signal.SIGKILL)
+        eventually(lambda: not alive(loader))
+        self.assertEqual(self.generation(), old)
+        self.zone.unlink()
+        self.write_zone('RECOVERED')
+        self.proc.send_signal(signal.SIGHUP)
+        eventually(lambda: self.query() == b'RECOVERED')
+
+    def test_loader_deadline_and_shutdown_remain_responsive(self):
+        self.start(extra=('-T', '1'))
+        old = self.generation()
+        loader = self.block_reload()
+        self.proc.send_signal(signal.SIGUSR1)
+        self.assertEqual(self.query(), b'OLD')
+        eventually(lambda: not alive(loader), timeout=4)
+        self.assertEqual(self.generation(), old)
+        self.assertEqual(self.query(), b'OLD')
+        self.log.seek(0)
+        self.assertIn('candidate deadline exceeded', self.log.read())
+
+    def test_controller_death_during_blocked_load_cleans_tree(self):
+        self.start(extra=('-T', '30'))
+        loader = self.block_reload()
+        self.known |= descendants(self.proc.pid)
+        self.proc.kill()
+        self.proc.wait(timeout=3)
+        eventually(lambda: all(not alive(pid) for pid in self.known), timeout=8)
+        self.assertFalse(alive(loader))
+
+    def test_guardian_crash_kills_candidate_descendants(self):
+        self.start(extra=('-T', '30'))
+        active_guardians = direct_children(self.proc.pid)
+        loader = self.block_reload()
+        guardian = next(iter(direct_children(self.proc.pid) - active_guardians))
+        os.kill(guardian, signal.SIGKILL)
+        eventually(lambda: not alive(loader), timeout=3)
+        self.assertEqual(self.query(), b'OLD')
+
+    def test_initial_load_failure_exits(self):
+        self.zone.unlink()
+        self.proc = subprocess.Popen(
+            [BINARY, '-n', '-W', '3', '-b', f'127.0.0.1/{self.port}',
+             'example.test:dnhash:' + str(self.zone)],
+            stdout=self.log, stderr=self.log)
+        self.assertEqual(self.proc.wait(timeout=4), 1)
+
     def test_single_worker_compatibility(self):
         self.start(count=1)
         self.assertFalse(self.generation())
@@ -284,7 +379,7 @@ class Workers(unittest.TestCase):
     def tearDown(self):
         try:
             if self.proc and self.proc.poll() is None:
-                self.known |= children(self.proc.pid)
+                self.known |= descendants(self.proc.pid)
                 self.proc.terminate()
                 self.proc.wait(timeout=8)
             eventually(lambda: all(not alive(pid) for pid in self.known))

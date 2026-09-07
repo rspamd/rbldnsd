@@ -2,7 +2,7 @@ CMAKE_MINIMUM_REQUIRED(VERSION 3.9 FATAL_ERROR)
 project(rbldnsd C ASM)
 
 set(CMAKE_C_STANDARD 11)
-set(RBLDNSD_VERSION 1.0.3)
+set(RBLDNSD_VERSION 1.1.0)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
@@ -24,6 +24,8 @@ test_big_endian(IS_BIG_ENDIAN)
 include(Toolset)
 include(Sanitizer)
 include(CheckFunctionExists)
+include(CheckSymbolExists)
+include(CheckIncludeFile)
 include(CheckCCompilerFlag)
 include(AsmOp)
 include(FindArch)
@@ -34,6 +36,15 @@ find_package(AWK REQUIRED)
 
 
 check_function_exists(setitimer HAVE_SETITIMER)
+
+check_include_file(sys/random.h HAVE_SYS_RANDOM_H)
+if(HAVE_SYS_RANDOM_H)
+  check_symbol_exists(getrandom "sys/random.h" HAVE_GETRANDOM)
+  check_symbol_exists(getentropy "sys/random.h;unistd.h" HAVE_GETENTROPY)
+else()
+  check_symbol_exists(getentropy "unistd.h" HAVE_GETENTROPY)
+endif()
+
 
 IF(ENABLE_JEMALLOC MATCHES "ON")
     ProcessPackage(JEMALLOC LIBRARY jemalloc_pic jemalloc INCLUDE jemalloc.h INCLUDE_SUFFIXES include/jemalloc
@@ -77,9 +88,15 @@ add_executable(rbldnsd
         istream.c
         mempool.c
         rbldnsd.c
+        rbldnsd_control.c
+        rbldnsd_udp.c
+        rbldnsd_ratelimit.c
+        contrib/siphash/siphash.c
         rbldnsd_acl.c
         rbldnsd_aclkey.c
         rbldnsd_combined.c
+        rbldnsd_overlay.c
+        rbldnsd_snapshot.c
         rbldnsd_dnhash.c
         rbldnsd_dnset.c
         rbldnsd_entryparams.c
@@ -108,3 +125,8 @@ add_custom_command(
 
 
 install(TARGETS rbldnsd RUNTIME DESTINATION sbin)
+# Small process-level regression for fork-shared accounting, built alongside
+# the daemon so the Python suite can execute it without compiler discovery.
+add_executable(test_control_slots test/control_slots.c rbldnsd_control.c)
+target_compile_definitions(test_control_slots PRIVATE RBLDNSD_CONTROL_TESTING)
+target_link_libraries(test_control_slots ${RSPAMD_REQUIRED_LIBRARIES} ${CMAKE_REQUIRED_LIBRARIES})

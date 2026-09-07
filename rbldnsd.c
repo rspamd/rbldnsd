@@ -25,6 +25,11 @@
 #include <sys/wait.h>
 #include "ev.h"
 #include "rbldnsd.h"
+#include "rbldnsd_control.h"
+#include "rbldnsd_snapshot.h"
+#include "rbldnsd_udp.h"
+#include "rbldnsd_overlay.h"
+#include "rbldnsd_ratelimit.h"
 #include "sds/sds.h"
 
 
@@ -132,13 +137,28 @@ static int fork_on_reload; /* >0 - perform fork on reloads, <0 - this is a child
 static int can_reload; /* block reload when another reload is there */
 static int pending_reload = 0;
 #define MAXWORKERS 128
+static char *control_path;
+static unsigned control_generation;
+static unsigned overlay_capacity;
+static char *ratelimit_path;
 static int nworkers = 1, is_worker, worker_draining;
+static int is_generation, generation_control = -1, generation_activated;
+static unsigned generation_timeout = 60;
+static unsigned long generation_id;
+static int generation_start(struct ev_loop *loop);
+static void generation_signal(char command);
+static int generation_exited(pid_t pid);
 static int worker_sockets[MAXWORKERS][MAXSOCK];
 static ev_io *worker_ios;
 static ev_child worker_reaper;
 static int worker_image_valid = 1, workers_started, worker_replace_pending;
 static int worker_ready_fd = -1;
-struct worker_process { pid_t pid; int control; ev_tstamp deadline; };
+struct worker_process {
+  pid_t pid;
+  int control;
+  ev_tstamp deadline;
+  int metrics;
+};
 static struct worker_process workers[MAXWORKERS], retiring[MAXWORKERS];
 static void check_expires(void);
 static void replace_workers(struct ev_loop *loop);
@@ -156,6 +176,7 @@ hook_query_result_t hook_query_result;
 #endif
 
 /* a list of zonetypes. */
+int rbldnsd_snapshot_compiling;
 const struct dstype *ds_types[] = {
   dstype(ip4set),
   dstype(ip4tset),
@@ -164,6 +185,7 @@ const struct dstype *ds_types[] = {
   dstype(ip6trie),
   dstype(dnset),
   dstype(dnhash),
+  dstype(dnsnapshot),
   dstype(combined),
   dstype(generic),
   dstype(acl),
@@ -203,7 +225,11 @@ static void NORETURN usage(int exitcode) {
 " -c check - time interval to check for data file updates (1m)\n"
 " -p pidfile - write pid to specified file\n"
 " -n - do not become a daemon\n"
+" -O count - bounded shared exact-domain overrides (requires -M)\n"
+" -R file - customer quota policy (shared across workers)\n"
+" -M path - owner-only Unix datagram control socket (JSON replies)\n"
 " -W count - run 1..128 UDP workers with SO_REUSEPORT (default: 1)\n"
+" -T seconds - multiworker candidate load/start deadline (default: 60)\n"
 " -f - fork a child process while reloading zones, to process requests\n"
 "  during reload (may double memory requiriments)\n"
 " -q - quickstart, load zones after backgrounding\n"
@@ -227,6 +253,7 @@ static void NORETURN usage(int exitcode) {
 " -x extension - load given extension module (.so file)\n"
 " -X extarg - pass extarg to extension init routine\n"
 #endif
+" -B file - compile one dnhash dataset to an atomic dnsnapshot file\n"
 " -d - dump all zones in BIND format to standard output and exit\n"
 "each zone specified using `name:type:file,file...'\n"
 "syntax, repeated names constitute the same zone.\n"
@@ -572,6 +599,7 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
   int nba = 0;
   uid_t uid = 0;
   gid_t gid = 0;
+  const char *compile_output = NULL;
   int nodaemon = 0, quickstart = 0, dump = 0, nover = 0, forkon = 0, dry_run = 0;
 #ifdef NO_IPv6
   int family = AF_INET;
@@ -585,81 +613,133 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
   int (*extinit)(const char *arg, struct zone *zonelist) = NULL;
 #endif
 
-  if ((progname = strrchr(argv[0], '/')) != NULL)
+  if ((progname = strrchr(argv[0], '/')) != NULL) {
     argv[0] = ++progname;
-  else
+  } else {
     progname = argv[0];
+  }
 
-  if (argc <= 1) usage(1);
+  if (argc <= 1) {
+    usage(1);
+  }
 
-  while((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:")) != EOF)
-    switch(c) {
+  while ((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:T:O:R:")) != EOF) {
+    switch (c) {
+    case 'O': {
+      char *end;
+      unsigned long n = strtoul(optarg, &end, 10);
+      if (!*optarg || *end || n < 1 || n > 65536) {
+        error(0, "invalid overlay capacity (1..65536)");
+      }
+      overlay_capacity = n;
+      break;
+    }
+    case 'R':
+      ratelimit_path = optarg;
+      break;
+    case 'M':
+      control_path = optarg;
+      break;
+    case 'T': {
+      char *end;
+      unsigned long seconds = strtoul(optarg, &end, 10);
+      if (!*optarg || *end || seconds < 1 || seconds > 86400) {
+        error(0, "invalid generation timeout (expected 1..86400 seconds)");
+      }
+      generation_timeout = seconds;
+      break;
+    }
     case 'W': {
       char *end;
       long count = strtol(optarg, &end, 10);
-      if (!*optarg || *end || count < 1 || count > MAXWORKERS)
+      if (!*optarg || *end || count < 1 || count > MAXWORKERS) {
         error(0, "invalid worker count (expected 1..128)");
+      }
       nworkers = (int)count;
       break;
     }
-    case 'u': user = optarg; break;
-    case 'r': rootdir = optarg; break;
+    case 'u':
+      user = optarg;
+      break;
+    case 'r':
+      rootdir = optarg;
+      break;
     case 'b':
-      if (nba >= MAXSOCK)
+      if (nba >= MAXSOCK) {
         error(0, "too many addresses to listen on (%d max)", MAXSOCK);
+      }
       bindaddr[nba++] = optarg;
       break;
     case 'U':
       update_addr = optarg;
       break;
 #ifndef NO_IPv6
-    case '4': family = AF_INET; break;
-    case '6': family = AF_INET6; break;
+    case '4':
+      family = AF_INET;
+      break;
+    case '6':
+      family = AF_INET6;
+      break;
 #else
-    case '4': break;
-    case '6': error(0, "IPv6 support isn't compiled in");
+    case '4':
+      break;
+    case '6':
+      error(0, "IPv6 support isn't compiled in");
 #endif
-    case 'w': workdir = optarg; break;
-    case 'p': pidfile = optarg; break;
+    case 'w':
+      workdir = optarg;
+      break;
+    case 'p':
+      pidfile = optarg;
+      break;
     case 't':
       p = optarg;
-      if (*p == ':') ++p;
-      else {
-        if (!(p = parse_time(p, &def_ttl)) || !def_ttl ||
-            (*p && *p++ != ':'))
+      if (*p == ':') {
+        ++p;
+      } else {
+        if (!(p = parse_time(p, &def_ttl)) || !def_ttl || (*p && *p++ != ':')) {
           error(0, "invalid ttl (-t) value `%.50s'", optarg);
+        }
       }
-      if (*p == ':') ++p;
-      else if (*p) {
-        if (!(p = parse_time(p, &min_ttl)) || (*p && *p++ != ':'))
+      if (*p == ':') {
+        ++p;
+      } else if (*p) {
+        if (!(p = parse_time(p, &min_ttl)) || (*p && *p++ != ':')) {
           error(0, "invalid minttl (-t) value `%.50s'", optarg);
+        }
       }
-      if (*p == ':') ++p;
-      else if (*p) {
-        if (!(p = parse_time(p, &max_ttl)) || (*p && *p++ != ':'))
+      if (*p == ':') {
+        ++p;
+      } else if (*p) {
+        if (!(p = parse_time(p, &max_ttl)) || (*p && *p++ != ':')) {
           error(0, "invalid maxttl (-t) value `%.50s'", optarg);
+        }
       }
-      if (*p)
+      if (*p) {
         error(0, "invalid value for -t (ttl) option: `%.50s'", optarg);
-      if ((min_ttl && max_ttl && min_ttl > max_ttl) ||
-          (min_ttl && def_ttl < min_ttl) ||
-          (max_ttl && def_ttl > max_ttl))
-        error(0, "inconsistent def:min:max ttl: %u:%u:%u",
-              def_ttl, min_ttl, max_ttl);
+      }
+      if ((min_ttl && max_ttl && min_ttl > max_ttl) || (min_ttl && def_ttl < min_ttl) ||
+          (max_ttl && def_ttl > max_ttl)) {
+        error(0, "inconsistent def:min:max ttl: %u:%u:%u", def_ttl, min_ttl, max_ttl);
+      }
       break;
     case 'c':
-      if (!(p = parse_time(optarg, &recheck)) || *p)
+      if (!(p = parse_time(optarg, &recheck)) || *p) {
         error(0, "invalid check interval (-c) value `%.50s'", optarg);
+      }
       break;
-    case 'n': nodaemon = 1; break;
-    case 'e': accept_in_cidr = 1; break;
+    case 'n':
+      nodaemon = 1;
+      break;
+    case 'e':
+      accept_in_cidr = 1;
+      break;
     case 'l':
       logfile = optarg;
 
       if (*logfile != '+') {
         flushlog = 0;
-      }
-      else {
+      } else {
         ++logfile;
         flushlog = 1;
       }
@@ -667,77 +747,126 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
       if (!*logfile) {
         logfile = NULL;
         flushlog = 0;
-      }
-      else if (logfile[0] == '-' && logfile[1] == '\0') {
+      } else if (logfile[0] == '-' && logfile[1] == '\0') {
         /* No need to reopen stdout */
         logfile = NULL;
         flog = stdout;
       }
       break;
-break;
+      break;
     case 's':
 #ifdef NO_STATS
-      fprintf(stderr,
-        "%s: warning: no statistics counters support is compiled in\n",
-        progname);
+      fprintf(stderr, "%s: warning: no statistics counters support is compiled in\n", progname);
 #else
       statsfile = optarg;
-      if (*statsfile != '+') stats_relative = 0;
-      else ++statsfile, stats_relative = 1;
-      if (!*statsfile) statsfile = NULL;
+      if (*statsfile != '+') {
+        stats_relative = 0;
+      } else {
+        ++statsfile, stats_relative = 1;
+      }
+      if (!*statsfile) {
+        statsfile = NULL;
+      }
 #endif
       break;
-    case 'q': quickstart = 1; break;
+    case 'q':
+      quickstart = 1;
+      break;
+    case 'B':
+      compile_output = optarg;
+      rbldnsd_snapshot_compiling = 1;
+      break;
     case 'd':
       dump = 1;
       break;
-    case 'D': dry_run = 1; break;
-    case 'v': show_version = nover++ ? NULL : "rbldnsd"; break;
-    case 'a': lazy = 1; break;
-    case 'A': lazy = 0; break;
-    case 'f': forkon = 1; break;
-    case 'F': facility = optarg; break;
-    case 'C': nouncompress = 1; break;
+    case 'D':
+      dry_run = 1;
+      break;
+    case 'v':
+      show_version = nover++ ? NULL : "rbldnsd";
+      break;
+    case 'a':
+      lazy = 1;
+      break;
+    case 'A':
+      lazy = 0;
+      break;
+    case 'f':
+      forkon = 1;
+      break;
+    case 'F':
+      facility = optarg;
+      break;
+    case 'C':
+      nouncompress = 1;
+      break;
 #ifndef NO_DSO
-    case 'x': ext = optarg; break;
-    case 'X': extarg = optarg; break;
+    case 'x':
+      ext = optarg;
+      break;
+    case 'X':
+      extarg = optarg;
+      break;
 #else
     case 'x':
     case 'X':
       error(0, "extension support is not compiled in");
 #endif
-    case 'h': usage(0);
-    default: error(0, "type `%.50s -h' for help", progname);
+    case 'h':
+      usage(0);
+    default:
+      error(0, "type `%.50s -h' for help", progname);
     }
-    /* options switch end */
+  }
+  /* options switch end */
 
-  if (!(argc -= optind))
+  char quota_error[160];
+  if (rbldnsd_ratelimit_init(ratelimit_path, quota_error, sizeof(quota_error)) < 0) {
+    error(0, "%s", quota_error);
+  }
+
+  if (!(argc -= optind)) {
     error(0, "no zone(s) to service specified (-h for help)");
+  }
   argv += optind;
 
-  if (dump || dry_run) {
+  if (dump || dry_run || compile_output) {
     time_t now;
     logto = LOGTO_STDERR;
-    for(c = 0; c < argc; ++c)
+    for (c = 0; c < argc; ++c) {
       zonelist = addzone(zonelist, argv[c]);
+    }
     init_zones_caches(zonelist);
-    if (rootdir && (chdir(rootdir) < 0 || chroot(rootdir) < 0))
+    if (rootdir && (chdir(rootdir) < 0 || chroot(rootdir) < 0)) {
       error(errno, "unable to chroot to %.50s", rootdir);
-    if (workdir && chdir(workdir) < 0)
+    }
+    if (workdir && chdir(workdir) < 0) {
       error(errno, "unable to chdir to %.50s", workdir);
-    if (!do_reload(0, loop))
+    }
+    if (!do_reload(0, loop)) {
       error(0, "zone loading errors, aborting");
+    }
 
+    if (compile_output) {
+      struct dataset *ds = nextdataset(NULL);
+      if (!ds || nextdataset(ds) || !isdstype(ds->ds_type, dnhash)) {
+        error(0, "-B requires exactly one dnhash dataset");
+      }
+      if (!rbldnsd_snapshot_write(ds, compile_output)) {
+        error(errno, "cannot compile snapshot (unsupported metadata or output error)");
+      }
+      exit(0);
+    }
     if (dump) {
       now = time(NULL);
       printf("; zone dump made %s", ctime(&now));
       printf("; rbldnsd version %s\n", version);
-      for (z = zonelist; z; z = z->z_next)
+      for (z = zonelist; z; z = z->z_next) {
         dumpzone(z, stdout);
+      }
       fflush(stdout);
       exit(ferror(stdout) ? 1 : 0);
-    }
-    else {
+    } else {
       /* Dry run */
       printf("zones loaded successfully\n");
       fflush(stdout);
@@ -745,32 +874,38 @@ break;
     }
   }
 
-  if (!nba)
+  if (!nba) {
     error(0, "no address to listen on (-b option) specified");
-
-  if ( facility == NULL ) {
-    logfacility = LOG_DAEMON;
   }
-  else {
-    if ( logfacility_lookup(facility, &logfacility) == 0 ) {
+
+  if (facility == NULL) {
+    logfacility = LOG_DAEMON;
+  } else {
+    if (logfacility_lookup(facility, &logfacility) == 0) {
       error(0, "log facility %s is not valid", facility);
     }
   }
 
   tzset();
-  if (nodaemon)
-    logto = LOGTO_STDOUT|LOGTO_STDERR;
-  else
-  {
+  if (nodaemon) {
+    logto = LOGTO_STDOUT | LOGTO_STDERR;
+  } else {
     /* fork early so that logging will be from right pid */
     int pfd[2];
-    if (pipe(pfd) < 0) error(errno, "pipe() failed");
+    if (pipe(pfd) < 0) {
+      error(errno, "pipe() failed");
+    }
     c = fork();
-    if (c < 0) error(errno, "fork() failed");
+    if (c < 0) {
+      error(errno, "fork() failed");
+    }
     if (c > 0) {
       close(pfd[1]);
-      if (read(pfd[0], &c, 1) < 1) exit(1);
-      else exit(0);
+      if (read(pfd[0], &c, 1) < 1) {
+        exit(1);
+      } else {
+        exit(0);
+      }
     }
 
     /* Forked process */
@@ -778,22 +913,27 @@ break;
     cfd = pfd[1];
     close(pfd[0]);
 
-
-    openlog(progname, LOG_PID|LOG_NDELAY, logfacility);
-    logto = LOGTO_STDERR|LOGTO_SYSLOG;
-    if (!quickstart && !flog) logto |= LOGTO_STDOUT;
+    openlog(progname, LOG_PID | LOG_NDELAY, logfacility);
+    logto = LOGTO_STDERR | LOGTO_SYSLOG;
+    if (!quickstart && !flog) {
+      logto |= LOGTO_STDOUT;
+    }
   }
 
   if (nworkers > 1) {
-    if (update_addr)
+    if (update_addr) {
       error(0, "-W cannot be combined with dynamic updates (-U)");
+    }
 #ifndef NO_STATS
-    if (statsfile)
+    if (statsfile) {
       error(0, "-W cannot be combined with a statistics file (-s)");
+    }
 #endif
-    for (c = 0; c < nba; ++c)
-      if (bindaddr[c][0] == '/' || bindaddr[c][0] == '.')
+    for (c = 0; c < nba; ++c) {
+      if (bindaddr[c][0] == '/' || bindaddr[c][0] == '.') {
         error(0, "-W requires IP UDP listening addresses");
+      }
+    }
   }
   initsockets(bindaddr, sock, nba, family);
   if (nworkers > 1) {
@@ -802,19 +942,24 @@ break;
     for (int i = 0; i < numsock; ++i) {
       struct sockaddr_storage addr;
       socklen_t len = sizeof(addr);
-      if (getsockname(sock[i], (struct sockaddr *)&addr, &len) < 0)
+      if (getsockname(sock[i], (struct sockaddr *)&addr, &len) < 0) {
         error(errno, "getsockname failed");
+      }
       worker_sockets[0][i] = sock[i];
       for (int j = 1; j < nworkers; ++j) {
         int one = 1, size = 65536;
         int fd = socket(addr.ss_family, SOCK_DGRAM, 0);
-        if (fd < 0) error(errno, "worker socket failed");
+        if (fd < 0) {
+          error(errno, "worker socket failed");
+        }
 #ifdef SO_REUSEPORT
-        if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0)
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0) {
           error(errno, "worker SO_REUSEPORT failed");
+        }
 #endif
-        if (bind(fd, (struct sockaddr *)&addr, len) < 0)
+        if (bind(fd, (struct sockaddr *)&addr, len) < 0) {
           error(errno, "worker bind failed");
+        }
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size));
         worker_sockets[j][i] = fd;
       }
@@ -830,42 +975,49 @@ break;
 #ifndef NO_DSO
   if (ext) {
     void *handle = dlopen(ext, RTLD_NOW);
-    if (!handle)
+    if (!handle) {
       error(0, "unable to load extension `%s': %s", ext, dlerror());
+    }
     extinit = dlsym(handle, "rbldnsd_extension_init");
-    if (!extinit)
+    if (!extinit) {
       error(0, "unable to find extension init routine in `%s'", ext);
+    }
   }
 #endif
 
-  if (!user && !(uid = getuid()))
+  if (!user && !(uid = getuid())) {
     user = "rbldns";
+  }
 
-  if (!user)
+  if (!user) {
     p = NULL;
-  else {
-    if ((p = strchr(user, ':')) != NULL)
+  } else {
+    if ((p = strchr(user, ':')) != NULL) {
       *p++ = '\0';
-    if ((c = satoi(user)) >= 0)
+    }
+    if ((c = satoi(user)) >= 0) {
       uid = c, gid = c;
-    else {
+    } else {
       struct passwd *pw = getpwnam(user);
-      if (!pw)
+      if (!pw) {
         error(0, "unknown user `%s'", user);
+      }
       uid = pw->pw_uid;
       gid = pw->pw_gid;
       endpwent();
     }
   }
-  if (!uid)
+  if (!uid) {
     error(0, "daemon should not run as root, specify -u option");
+  }
   if (p) {
-    if ((c = satoi(p)) >= 0)
+    if ((c = satoi(p)) >= 0) {
       gid = c;
-    else {
+    } else {
       struct group *gr = getgrnam(p);
-      if (!gr)
+      if (!gr) {
         error(0, "unknown group `%s'", p);
+      }
       gid = gr->gr_gid;
       endgrent();
     }
@@ -876,63 +1028,77 @@ break;
     int fdpid;
     char buf[40];
     c = sprintf(buf, "%ld\n", (long)getpid());
-    fdpid = open(pidfile, O_CREAT|O_WRONLY|O_TRUNC, 0644);
-    if (fdpid < 0 || write(fdpid, buf, c) < c)
+    fdpid = open(pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fdpid < 0 || write(fdpid, buf, c) < c) {
       error(errno, "unable to write pidfile");
+    }
     close(fdpid);
   }
 
-  if (rootdir && (chdir(rootdir) < 0 || chroot(rootdir) < 0))
+  if (rootdir && (chdir(rootdir) < 0 || chroot(rootdir) < 0)) {
     error(errno, "unable to chroot to %.50s", rootdir);
-  if (workdir && chdir(workdir) < 0)
+  }
+  if (workdir && chdir(workdir) < 0) {
     error(errno, "unable to chdir to %.50s", workdir);
+  }
 
-  if (user)
-    if (setgroups(1, &gid) < 0 || setgid(gid) < 0 || setuid(uid) < 0)
+  if (user) {
+    if (setgroups(1, &gid) < 0 || setgid(gid) < 0 || setuid(uid) < 0) {
       error(errno, "unable to setuid(%d:%d)", (int)uid, (int)gid);
+    }
+  }
 
-  for(c = 0; c < argc; ++c)
+  for (c = 0; c < argc; ++c) {
     zonelist = addzone(zonelist, argv[c]);
+  }
   init_zones_caches(zonelist);
 
 #ifndef NO_DSO
-  if (extinit && extinit(extarg, zonelist) != 0)
+  if (extinit && extinit(extarg, zonelist) != 0) {
     error(0, "unable to iniitialize extension `%s'", ext);
+  }
 #endif
 
-  if (!quickstart && !do_reload(0, loop))
+  if (nworkers == 1 && !quickstart && !do_reload(0, loop)) {
     error(0, "zone loading errors, aborting");
+  }
 
   /* count number of zones */
-  for(c = 0, z = zonelist; z; z = z->z_next)
+  for (c = 0, z = zonelist; z; z = z->z_next) {
     ++c;
+  }
   numzones = c;
 
 #if STATS_IPC_IOVEC
   stats_iov = (struct iovec *)emalloc(numzones * sizeof(struct iovec));
-  for(c = 0, z = zonelist; z; z = z->z_next, ++c) {
-    stats_iov[c].iov_base = (char*)&z->z_stats;
+  for (c = 0, z = zonelist; z; z = z->z_next, ++c) {
+    stats_iov[c].iov_base = (char *)&z->z_stats;
     stats_iov[c].iov_len = sizeof(z->z_stats);
   }
 #endif
-  dslog(LOG_INFO, 0, "rbldnsd version %s started (%d socket(s), %d zone(s))",
-        version, numsock, numzones);
+  dslog(LOG_INFO, 0, "rbldnsd version %s started (%d socket(s), %d zone(s))", version, numsock,
+        numzones);
   initialized = 1;
 
   if (cfd >= 0) {
-    if (nworkers > 1 && !quickstart) worker_ready_fd = cfd;
-    else {
+    if (nworkers > 1 && !quickstart) {
+      worker_ready_fd = cfd;
+    } else {
       write(cfd, "", 1);
       close(cfd);
     }
-    close(0); close(2);
-    if (!flog) close(1);
+    close(0);
+    close(2);
+    if (!flog) {
+      close(1);
+    }
     setsid();
     logto = LOGTO_SYSLOG;
   }
 
-  if (quickstart)
+  if (quickstart && nworkers == 1) {
     do_reload(0, loop);
+  }
 
   /* only set "main" fork_on_reload after first reload */
   fork_on_reload = nworkers > 1 ? 0 : forkon;
@@ -1160,8 +1326,8 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
   int ip;
   struct dataset *ds;
   struct zone *zone;
-  pid_t cpid = 0;	/* child pid; =0 to make gcc happy */
-  int cfd = 0;		/* child stats fd; =0 to make gcc happy */
+  pid_t cpid = 0; /* child pid; =0 to make gcc happy */
+  int cfd = 0;    /* child stats fd; =0 to make gcc happy */
 #ifndef NO_TIMES
   struct tms tms;
   clock_t utm, etm;
@@ -1170,31 +1336,42 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 #endif
 #endif /* NO_TIMES */
 
+  if (nworkers > 1 && workers_started && !is_generation) {
+    return generation_start(loop);
+  }
   pending_reload = 0;
   ds = nextdataset2reload(NULL);
   if (!ds && call_hook(reload_check, (zonelist)) == 0) {
     check_expires();
-    return 1;	/* nothing to reload */
+    if (nworkers == 1) {
+      rbldnsd_control_reload(1);
+    }
+    return 1; /* nothing to reload */
   }
 
-  if (nworkers > 1) do_fork = 0;
+  if (nworkers > 1 || control_path) {
+    do_fork = 0;
+  }
+  if (nworkers == 1) {
+    rbldnsd_control_reload(-1);
+  }
 
   if (do_fork) {
     int pfd[2];
-    if (flog && !flushlog)
+    if (flog && !flushlog) {
       fflush(flog);
+    }
     /* forking reload. if anything fails, just do a non-forking one */
     if (pipe(pfd) < 0) {
       do_fork = 0;
-    }
-    else if ((cpid = fork()) < 0) {	/* fork failed, close the pipe */
+    } else if ((cpid = fork()) < 0) { /* fork failed, close the pipe */
       close(pfd[0]);
       close(pfd[1]);
       do_fork = 0;
     }
 
     if (do_fork) {
-      if (!cpid) {  /* child, continue answering queries */
+      if (!cpid) { /* child, continue answering queries */
         fork_on_reload = -1;
         can_reload = 0; /* Deny reload for child process */
         ev_loop_fork(loop);
@@ -1218,17 +1395,19 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 
 #ifndef NO_TIMES
 #ifndef HZ
-  if (!HZ)
+  if (!HZ) {
     HZ = sysconf(_SC_CLK_TCK);
+  }
 #endif
   etm = times(&tms);
   utm = tms.tms_utime;
 #endif /* NO_TIMES */
 
   r = 1;
-  while(ds) {
-    if (!loaddataset(ds, loop))
+  while (ds) {
+    if (!loaddataset(ds, loop)) {
       r = 0;
+    }
     ds = nextdataset2reload(ds);
   }
 
@@ -1240,46 +1419,47 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
     unsigned nsttl = 0;
     struct dslist *dsl;
 
-    for(dsl = zone->z_dsl; dsl; dsl = dsl->dsl_next) {
+    for (dsl = zone->z_dsl; dsl; dsl = dsl->dsl_next) {
       const struct dataset *ds = dsl->dsl_ds;
       if (!ds->ds_stamp) {
         stamp = 0;
         break;
       }
-      if (stamp < ds->ds_stamp)
+      if (stamp < ds->ds_stamp) {
         stamp = ds->ds_stamp;
-      if (ds->ds_expires && (!expires || expires > ds->ds_expires))
+      }
+      if (ds->ds_expires && (!expires || expires > ds->ds_expires)) {
         expires = ds->ds_expires;
-      if (!dssoa)
+      }
+      if (!dssoa) {
         dssoa = ds->ds_dssoa;
-      if (!dsns)
+      }
+      if (!dsns) {
         dsns = ds->ds_dsns, nsttl = ds->ds_nsttl;
+      }
     }
 
     zone->z_expires = expires;
     zone->z_stamp = stamp;
     if (!stamp) {
-      zlog(LOG_WARNING, zone,
-           "not all datasets are loaded, zone will not be serviced");
+      zlog(LOG_WARNING, zone, "not all datasets are loaded, zone will not be serviced");
       r = 0;
+    } else if (!update_zone_soa(zone, dssoa) || !update_zone_ns(zone, dsns, nsttl, zonelist)) {
+      zlog(LOG_WARNING, zone, "NS or SOA RRs are too long, will be ignored");
     }
-    else if (!update_zone_soa(zone, dssoa) ||
-             !update_zone_ns(zone, dsns, nsttl, zonelist))
-      zlog(LOG_WARNING, zone,
-           "NS or SOA RRs are too long, will be ignored");
   }
 
-  if (call_hook(reload, (zonelist)) != 0)
+  if (call_hook(reload, (zonelist)) != 0) {
     r = 0;
+  }
 
   ip = ssprintf(ibuf, sizeof(ibuf), "zones reloaded");
 #ifndef NO_TIMES
   etm = times(&tms) - etm;
   utm = tms.tms_utime - utm;
-# define sec(tm) (unsigned long)(tm/HZ), (unsigned long)((tm*100/HZ)%100)
-  ip += ssprintf(ibuf + ip, sizeof(ibuf) - ip,
-        ", time %lu.%lue/%lu.%luu sec", sec(etm), sec(utm));
-# undef sec
+#define sec(tm) (unsigned long)(tm / HZ), (unsigned long)((tm * 100 / HZ) % 100)
+  ip += ssprintf(ibuf + ip, sizeof(ibuf) - ip, ", time %lu.%lue/%lu.%luu sec", sec(etm), sec(utm));
+#undef sec
 #endif /* NO_TIMES */
 #ifdef WITH_JEMALLOC
   struct jemalloc_write_cbdata cbd;
@@ -1292,11 +1472,10 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 #if !defined(NO_MEMINFO) && defined(__GLIBC__)
   {
     struct mallinfo mi = mallinfo();
-# define kb(x) ((mi.x + 512)>>10)
-    ip += ssprintf(ibuf + ip, sizeof(ibuf) - ip,
-          ", mem arena=%d free=%d mmap=%d Kb",
-          kb(arena), kb(fordblks), kb(hblkhd));
-# undef kb
+#define kb(x) ((mi.x + 512) >> 10)
+    ip += ssprintf(ibuf + ip, sizeof(ibuf) - ip, ", mem arena=%d free=%d mmap=%d Kb", kb(arena),
+                   kb(fordblks), kb(hblkhd));
+#undef kb
   }
 #endif /* NO_MEMINFO */
 #endif
@@ -1312,17 +1491,25 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
     }
   }
 
-  if (nworkers > 1 && workers_started) {
-    worker_image_valid = r;
-    if (r) replace_workers(loop);
-    else {
-      /* A failed load may have changed part of the owner's image. Never
-       * fork it; force every dataset to be reconsidered on the next try. */
-      struct dataset *retry = NULL;
-      while ((retry = nextdataset(retry)) != NULL)
-        for (struct dsfile *f = retry->ds_dsf; f; f = f->dsf_next)
-          f->dsf_stamp = 0;
-      dslog(LOG_WARNING, 0, "reload failed; keeping old workers");
+  if (nworkers == 1) {
+    rbldnsd_control_reload(r);
+    if (r && rbldnsd_overlay_target_count() > 0) {
+      unsigned count = rbldnsd_overlay_target_count();
+      struct rbldnsd_overlay_identity *identities;
+
+      identities = calloc(count, sizeof(*identities));
+      if (identities) {
+        rbldnsd_overlay_base_identities(identities, count);
+        rbldnsd_overlay_retired(identities, count);
+        free(identities);
+      }
+      else {
+        dslog(LOG_WARNING, 0, "cannot reclaim overlay entries: %s",
+              strerror(errno));
+      }
+    }
+    if (r && control_path) {
+      rbldnsd_control_generation(++control_generation);
     }
   }
   return r;
@@ -1418,14 +1605,29 @@ static void delayed_timer_cb(struct ev_loop *loop, ev_timer *w, int revents) {
     }
 
     if (r.buf && r.len) {
-      (void)sendto(r.fd, r.buf, r.len, 0, (struct sockaddr *)&r.peer, r.peerlen);
+      struct iovec iov = {r.buf, r.len};
+#ifdef WITH_RECVMMSG
+      struct mmsghdr batch = {0};
+      struct msghdr *header = &batch.msg_hdr;
+#else
+      struct msghdr batch = {0};
+      struct msghdr *header = &batch;
+#endif
+      header->msg_name = &r.peer;
+      header->msg_namelen = r.peerlen;
+      header->msg_iov = &iov;
+      header->msg_iovlen = 1;
+      rbldnsd_udp_send(r.fd, &batch, 1);
       delayed_bytes -= r.len;
       free(r.buf);
     }
   }
 
+  rbldnsd_control_backlog(delayed_heap_len, delayed_bytes);
   delayed_schedule_timer(loop);
-  if (worker_draining && !delayed_heap_len) ev_break(loop, EVBREAK_ALL);
+  if (worker_draining && !delayed_heap_len) {
+    ev_break(loop, EVBREAK_ALL);
+  }
 }
 
 static void delayed_init(struct ev_loop *loop) {
@@ -1473,6 +1675,7 @@ static int delayed_push(int fd, const struct sockaddr *peer, socklen_t peerlen,
   delayed_bytes += len;
   delayed_sift_up(delayed_heap_len);
   delayed_heap_len++;
+  rbldnsd_control_backlog(delayed_heap_len, delayed_bytes);
 
   delayed_schedule_timer(delayed_loop);
   return 1;
@@ -1485,7 +1688,7 @@ static int request(int fd) {
 #else
   struct sockaddr_in peer_sa[MSGVEC_LEN];
 #endif
-  socklen_t salen = sizeof(peer_sa);
+  socklen_t salen = sizeof(peer_sa[0]);
   struct dnsqinfo qi;
   struct dnspacket pkt[MSGVEC_LEN];
   struct iovec iovs[MSGVEC_LEN];
@@ -1498,9 +1701,15 @@ static int request(int fd) {
   struct msghdr msg[MSGVEC_LEN];
 #endif
 
+  /* cmsghdr member guarantees alignment of each ancillary buffer. */
+  union {
+    struct cmsghdr align;
+    unsigned char data[CMSG_SPACE(sizeof(uint32_t))];
+  } ancillary[MSGVEC_LEN];
+
   memset(msg, 0, sizeof(*msg) * MSGVEC_LEN);
 
-  for (int i = 0; i < MSGVEC_LEN; i ++) {
+  for (int i = 0; i < MSGVEC_LEN; i++) {
     /* Prepare msghdr structs */
     iovs[i].iov_base = pkt[i].p_buf;
     iovs[i].iov_len = sizeof(pkt[i].p_buf);
@@ -1508,6 +1717,8 @@ static int request(int fd) {
     MSG_FIELD(msg[i], msg_namelen) = salen;
     MSG_FIELD(msg[i], msg_iov) = &iovs[i];
     MSG_FIELD(msg[i], msg_iovlen) = 1;
+    MSG_FIELD(msg[i], msg_control) = ancillary[i].data;
+    MSG_FIELD(msg[i], msg_controllen) = sizeof(ancillary[i].data);
   }
 #ifdef WITH_RECVMMSG
   q = recvmmsg(fd, msg, MSGVEC_LEN, 0, NULL);
@@ -1520,14 +1731,27 @@ static int request(int fd) {
     return -1;
   }
 
-  for (int i = 0; i < lim; i ++) {
+  for (int i = 0; i < lim; i++) {
 #ifdef WITH_RECVMMSG
     q = msg[i].msg_len;
 #endif
+#ifdef WITH_RECVMMSG
+    rbldnsd_udp_received(fd, &msg[i].msg_hdr);
+#else
+    rbldnsd_udp_received(fd, &msg[i]);
+#endif
+    if ((MSG_FIELD(msg[i], msg_flags) & MSG_TRUNC) || q > (int)sizeof(pkt[i].p_buf) ||
+        MSG_FIELD(msg[i], msg_namelen) > sizeof(peer_sa[i]) ||
+        MSG_FIELD(msg[i], msg_namelen) < sizeof(struct sockaddr_in)) {
+      replies_lengths[i] = 0;
+      rbldnsd_control_query(q, 0, 0);
+      continue;
+    }
     pkt[i].p_peerlen = MSG_FIELD(msg[i], msg_namelen);
     pkt[i].p_peer = MSG_FIELD(msg[i], msg_name);
     pkt[i].p_delay_ms = 0;
     replies_lengths[i] = replypacket(&pkt[i], q, zonelist, &qi);
+    rbldnsd_control_query(q, replies_lengths[i], replies_lengths[i] > 0 ? pkt[i].p_buf[3] & 15 : 0);
 
     if (flog) {
       logreply(&pkt[i], flog, flushlog, &qi, replies_lengths[i]);
@@ -1535,12 +1759,10 @@ static int request(int fd) {
   }
 
   int cur_rep = 0;
-  for (int i = 0; i < lim; i ++) {
+  for (int i = 0; i < lim; i++) {
     if (replies_lengths[i] > 0 && pkt[i].p_delay_ms > 0) {
-      if (delayed_push(fd, (const struct sockaddr *)&peer_sa[i],
-                       MSG_FIELD(msg[i], msg_namelen),
-                       pkt[i].p_buf, (size_t)replies_lengths[i],
-                       pkt[i].p_delay_ms)) {
+      if (delayed_push(fd, (const struct sockaddr *)&peer_sa[i], MSG_FIELD(msg[i], msg_namelen),
+                       pkt[i].p_buf, (size_t)replies_lengths[i], pkt[i].p_delay_ms)) {
         replies_lengths[i] = 0;
       }
     }
@@ -1552,23 +1774,14 @@ static int request(int fd) {
       MSG_FIELD(msg[cur_rep], msg_namelen) = MSG_FIELD(msg[i], msg_namelen);
       MSG_FIELD(msg[cur_rep], msg_iov) = &iovs[cur_rep];
       MSG_FIELD(msg[cur_rep], msg_iovlen) = 1;
-      cur_rep ++;
+      MSG_FIELD(msg[cur_rep], msg_control) = NULL;
+      MSG_FIELD(msg[cur_rep], msg_controllen) = 0;
+      MSG_FIELD(msg[cur_rep], msg_flags) = 0;
+      cur_rep++;
     }
   }
 
-#ifdef WITH_RECVMMSG
-  while (sendmmsg(fd, msg, cur_rep, 0) < 0) {
-    if (errno != EINTR && errno != EAGAIN) {
-      break;
-    }
-  }
-#else
-  while (sendmsg(fd, msg, 0) < 0) {
-    if (errno != EINTR && errno != EAGAIN) {
-      break;
-    }
-  }
-#endif
+  rbldnsd_udp_send(fd, msg, cur_rep);
 
   return 1;
 }
@@ -1689,24 +1902,36 @@ ev_update_handler(struct ev_loop *loop, ev_io *w, int revents)
  * Signal handlers
  */
 static void
-ev_usr1_handler (struct ev_loop *loop, ev_signal *w, int revents)
-{
-  if (nworkers > 1 && !is_worker)
-    for (int i = 0; i < nworkers; ++i)
-      if (workers[i].pid) kill(workers[i].pid, SIGUSR1);
+ev_usr1_handler(struct ev_loop *loop, ev_signal *w, int revents) {
+  if (nworkers > 1 && !is_worker && !is_generation) {
+    generation_signal('1');
+  }
+  if (nworkers > 1 && !is_worker) {
+    for (int i = 0; i < nworkers; ++i) {
+      if (workers[i].pid) {
+        kill(workers[i].pid, SIGUSR1);
+      }
+    }
+  }
   if (statsfile) {
     dumpstats();
   }
 
-    logstats(0);
+  logstats(0);
 }
 
 static void
-ev_usr2_handler(struct ev_loop *loop, ev_signal *w, int revents)
-{
-  if (nworkers > 1 && !is_worker)
-    for (int i = 0; i < nworkers; ++i)
-      if (workers[i].pid) kill(workers[i].pid, SIGUSR2);
+ev_usr2_handler(struct ev_loop *loop, ev_signal *w, int revents) {
+  if (nworkers > 1 && !is_worker && !is_generation) {
+    generation_signal('2');
+  }
+  if (nworkers > 1 && !is_worker) {
+    for (int i = 0; i < nworkers; ++i) {
+      if (workers[i].pid) {
+        kill(workers[i].pid, SIGUSR2);
+      }
+    }
+  }
   if (statsfile) {
     dumpstats();
   }
@@ -1717,23 +1942,37 @@ ev_usr2_handler(struct ev_loop *loop, ev_signal *w, int revents)
     dumpstats_z();
   }
 
-  if (is_worker) return;
+  if (is_worker || is_generation) {
+    return;
+  }
   if (can_reload) {
     do_reload(fork_on_reload, loop);
-  }
-  else {
+  } else {
     pending_reload = 1;
     dslog(LOG_INFO, 0, "already reloading, ignore reload on SIGUSR2");
   }
 }
 
 static void
-ev_hup_handler(struct ev_loop *loop, ev_signal *w, int revents)
-{
-  if (is_worker) { reopenlog(); return; }
-  if (nworkers > 1)
-    for (int i = 0; i < nworkers; ++i)
-      if (workers[i].pid) kill(workers[i].pid, SIGHUP);
+ev_hup_handler(struct ev_loop *loop, ev_signal *w, int revents) {
+  if (is_worker) {
+    reopenlog();
+    return;
+  }
+  if (!is_generation && nworkers > 1) {
+    generation_signal('H');
+  }
+  if (nworkers > 1) {
+    for (int i = 0; i < nworkers; ++i) {
+      if (workers[i].pid) {
+        kill(workers[i].pid, SIGHUP);
+      }
+    }
+  }
+  if (is_generation) {
+    reopenlog();
+    return;
+  }
   if (can_reload) {
     reopenlog();
 
@@ -1742,20 +1981,20 @@ ev_hup_handler(struct ev_loop *loop, ev_signal *w, int revents)
     }
 
     do_reload(fork_on_reload, loop);
-  }
-  else {
+  } else {
     pending_reload = 1;
     dslog(LOG_INFO, 0, "already reloading, ignore SIGHUP");
   }
 }
 
 static void
-ev_term_handler (struct ev_loop *loop, ev_signal *w, int revents)
-{
-  if (is_worker) { worker_shutdown(loop); return; }
+ev_term_handler(struct ev_loop *loop, ev_signal *w, int revents) {
+  if (is_worker) {
+    worker_shutdown(loop);
+    return;
+  }
   if (fork_on_reload < 0) { /* this is a temp child; dump stats and exit */
-    dslog(LOG_INFO, 0, "temp worker received terminating signal %s",
-        strsignal(w->signum));
+    dslog(LOG_INFO, 0, "temp worker received terminating signal %s", strsignal(w->signum));
     /* pipe end is stored in fork_on_reload for a child */
     ipc_write_stats(-(fork_on_reload));
     if (flog && !flushlog) {
@@ -1775,7 +2014,7 @@ ev_term_handler (struct ev_loop *loop, ev_signal *w, int revents)
     dumpstats_z();
   }
 #endif
-  ev_break (loop, EVBREAK_ALL);
+  ev_break(loop, EVBREAK_ALL);
 }
 
 static void setup_signals(struct ev_loop *loop) {
@@ -1806,6 +2045,7 @@ static void worker_drain_timeout(struct ev_loop *loop, ev_timer *w, int revents)
 static void worker_shutdown(struct ev_loop *loop) {
   if (worker_draining) return;
   worker_draining = 1;
+  rbldnsd_control_draining();
   for (int i = 0; i < numsock; ++i) ev_io_stop(loop, &worker_ios[i]);
   if (!delayed_heap_len) ev_break(loop, EVBREAK_ALL);
   else {
@@ -1823,20 +2063,39 @@ static void worker_control(struct ev_loop *loop, ev_io *w, int revents) {
   }
 }
 
-static void run_worker(int slot, int control) {
+static void run_worker(int slot, int control, int metrics) {
   struct ev_loop *loop;
   ev_io ctl;
   is_worker = 1;
-  if (worker_ready_fd >= 0) close(worker_ready_fd);
+  rbldnsd_control_child();
+  rbldnsd_overlay_child();
+  if (!rbldnsd_control_worker(metrics)) {
+    _exit(1);
+  }
+  if (generation_control >= 0) {
+    close(generation_control);
+  }
+  if (worker_ready_fd >= 0) {
+    close(worker_ready_fd);
+  }
   can_reload = 0;
   fork_on_reload = 0;
   for (int i = 0; i < nworkers; ++i) {
-    if (workers[i].pid) close(workers[i].control);
-    if (retiring[i].pid) close(retiring[i].control);
-    for (int j = 0; j < numsock; ++j)
-      if (i != slot) close(worker_sockets[i][j]);
+    if (workers[i].pid) {
+      close(workers[i].control);
+    }
+    if (retiring[i].pid) {
+      close(retiring[i].control);
+    }
+    for (int j = 0; j < numsock; ++j) {
+      if (i != slot) {
+        close(worker_sockets[i][j]);
+      }
+    }
   }
-  for (int j = 0; j < numsock; ++j) sock[j] = worker_sockets[slot][j];
+  for (int j = 0; j < numsock; ++j) {
+    sock[j] = worker_sockets[slot][j];
+  }
   loop = ev_default_loop(0);
   /* libev signal lists are process-global and outlive loop destruction.
    * Unlink inherited watchers before reinitializing the same objects. */
@@ -1848,32 +2107,49 @@ static void run_worker(int slot, int control) {
   ev_signal_stop(loop, &ev_int);
   ev_default_destroy();
   loop = ev_default_loop(0);
-  if (!loop) _exit(1);
+  if (!loop) {
+    _exit(1);
+  }
   delayed_init(loop);
   g_cached_time = time(NULL);
   ev_timer_init(&cached_time_timer, cached_time_cb, 0.0, 1.0);
   ev_timer_start(loop, &cached_time_timer);
   setup_signals(loop);
   worker_ios = calloc(numsock, sizeof(*worker_ios));
-  if (!worker_ios) _exit(1);
+  if (!worker_ios) {
+    _exit(1);
+  }
 #ifndef NO_STATS
   stats_time = time(NULL);
   memset(&gstats, 0, sizeof(gstats));
   memset(&gptot, 0, sizeof(gptot));
-  for (struct zone *z = zonelist; z; z = z->z_next)
+  for (struct zone *z = zonelist; z; z = z->z_next) {
     memset(&z->z_stats, 0, sizeof(z->z_stats));
+  }
 #endif
   for (int i = 0; i < numsock; ++i) {
-    if (make_socket_nonblocking(sock[i]) < 0) _exit(1);
+    if (make_socket_nonblocking(sock[i]) < 0) {
+      _exit(1);
+    }
     ev_io_init(&worker_ios[i], ev_request_handler, sock[i], EV_READ);
     ev_io_start(loop, &worker_ios[i]);
   }
   ev_io_init(&ctl, worker_control, control, EV_READ);
   ev_io_start(loop, &ctl);
-  if (write(control, "R", 1) != 1) _exit(1);
+  if (write(control, "R", 1) != 1) {
+    _exit(1);
+  }
+  if (is_generation) {
+    char activate;
+    if (read(control, &activate, 1) != 1 || activate != 'A') {
+      _exit(1);
+    }
+  }
   ev_run(loop, 0);
   logstats(0);
-  if (flog) fflush(flog);
+  if (flog) {
+    fflush(flog);
+  }
   _exit(0);
 }
 
@@ -1881,23 +2157,45 @@ static int spawn_worker(int slot) {
   int pair[2];
   pid_t pid;
   char ready;
-  if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) return 0;
-  if (flog) fflush(flog);
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) < 0) {
+    return 0;
+  }
+  if (flog) {
+    fflush(flog);
+  }
+  int metrics = rbldnsd_control_slot_alloc((unsigned)generation_id);
   pid = fork();
   if (pid == 0) {
     close(pair[0]);
-    run_worker(slot, pair[1]);
+    run_worker(slot, pair[1], metrics);
   }
   close(pair[1]);
-  if (pid < 0) { close(pair[0]); return 0; }
+  if (pid < 0) {
+    close(pair[0]);
+    rbldnsd_control_release(metrics);
+    return 0;
+  }
   /* Startup is bounded even if a child stalls before entering its loop. */
-  struct pollfd pfd = { pair[0], POLLIN, 0 };
+  struct pollfd pfd = {pair[0], POLLIN, 0};
   int r;
-  do r = poll(&pfd, 1, 5000); while (r < 0 && errno == EINTR);
+  do {
+    r = poll(&pfd, 1, 5000);
+  } while (r < 0 && errno == EINTR);
   if (r <= 0 || read(pair[0], &ready, 1) != 1 || ready != 'R') {
     close(pair[0]);
     kill(pid, SIGKILL);
-    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+    }
+    rbldnsd_control_release(metrics);
+    return 0;
+  }
+  workers[slot].metrics = metrics;
+  if (is_generation && generation_activated && write(pair[0], "A", 1) != 1) {
+    close(pair[0]);
+    kill(pid, SIGKILL);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {
+    }
+    rbldnsd_control_release(metrics);
     return 0;
   }
   workers[slot].pid = pid;
@@ -1917,34 +2215,43 @@ static void replace_workers(struct ev_loop *loop) {
       for (int j = 0; j < i; ++j) {
         close(workers[j].control);
         kill(workers[j].pid, SIGKILL);
-        while (waitpid(workers[j].pid, NULL, 0) < 0 && errno == EINTR) {}
+        while (waitpid(workers[j].pid, NULL, 0) < 0 && errno == EINTR) {
+        }
+        rbldnsd_control_release(workers[j].metrics);
       }
       memcpy(workers, retiring, sizeof(workers));
       memset(retiring, 0, sizeof(retiring));
       can_reload = 1;
-      if (!workers_started) error(0, "unable to start workers");
+      if (!workers_started) {
+        error(0, "unable to start workers");
+      }
       worker_replace_pending = 1;
       return;
     }
   }
   worker_replace_pending = 0;
   workers_started = 1;
-  for (i = 0; i < nworkers; ++i)
+  for (i = 0; i < nworkers; ++i) {
     if (retiring[i].pid) {
       /* shutdown sends EOF without releasing the descriptor until reaped. */
       shutdown(retiring[i].control, SHUT_WR);
       retiring[i].deadline = ev_time() + 6.0;
     }
+  }
 }
 
 static void worker_exited(struct ev_loop *loop, ev_child *w, int revents) {
+  if (!is_generation && generation_exited(w->rpid)) {
+    return;
+  }
   for (int i = 0; i < nworkers; ++i) {
-    struct worker_process *sets[] = { &retiring[i], &workers[i] };
+    struct worker_process *sets[] = {&retiring[i], &workers[i]};
     for (int j = 0; j < 2; ++j) {
       struct worker_process *p = sets[j];
       if (p->pid == w->rpid) {
         dslog(LOG_INFO, 0, "worker %d exited (status %x)", (int)p->pid, w->rstatus);
         close(p->control);
+        rbldnsd_control_release(p->metrics);
         p->pid = 0;
       }
     }
@@ -1974,25 +2281,40 @@ static void worker_supervise(struct ev_loop *loop, ev_timer *w, int revents) {
         retiring[i].deadline = 0;
       }
     }
-    if (!workers[i].pid && worker_image_valid) spawn_worker(i);
+    if (!workers[i].pid && worker_image_valid) {
+      spawn_worker(i);
+    }
+  }
+  if (is_generation) {
+    return;
   }
   can_reload = !draining;
   if (can_reload && (pending_reload || worker_replace_pending)) {
     pending_reload = 0;
     reopenlog();
     /* A queued signal alone must not rotate an unchanged generation. */
-    if (worker_replace_pending && !nextdataset2reload(NULL)) replace_workers(loop);
-    else do_reload(0, loop);
+    if (worker_replace_pending && !nextdataset2reload(NULL)) {
+      replace_workers(loop);
+    } else {
+      do_reload(0, loop);
+    }
   }
 }
+
+#include "rbldnsd_generation.c"
 
 /*
  * End of signal handlers
  */
 
+static void control_action(int action) {
+  /* Queue via existing signal watchers: response is sent before mutation. */
+  kill(getpid(), action == 1 ? SIGHUP : SIGTERM);
+}
+
 int main(int argc, char **argv) {
   struct ev_loop *loop;
-  ev_io *io_evs = NULL; /* Events for sockets */
+  ev_io *io_evs = NULL;     /* Events for sockets */
   ev_stat *stat_evs = NULL; /* Events for zone files */
 
 #ifdef EVFLAG_SIGNALFD
@@ -2003,7 +2325,7 @@ int main(int argc, char **argv) {
 
   if (loop == NULL) {
     syslog(LOG_CRIT, "cannot initialize event loop! bad $LIBEV_FLAGS in environment?");
-    abort ();
+    abort();
   }
 
   init(argc, argv, loop);
@@ -2019,34 +2341,84 @@ int main(int argc, char **argv) {
 
 #ifndef NO_STATS
   stats_time = time(NULL);
-  if (statsfile)
+  if (statsfile) {
     dumpstats_z();
+  }
 #endif
 
+  /* Initialize controller-owned services before forking query generations. */
+  if (overlay_capacity && !control_path) {
+    error(0, "-O requires -M");
+  }
+  if (rbldnsd_overlay_init(loop, overlay_capacity, control_action, zonelist) < 0) {
+    error(errno, "cannot initialize domain overlays");
+  }
+
+  if (rbldnsd_control_init(loop, control_path, control_action) < 0) {
+    error(errno, "cannot create control socket");
+  }
+
+  /* Allocate shared per-socket overflow baselines before any worker fork. */
+  int udp_maxfd = 0;
+  for (int i = 0; i < nworkers; ++i) {
+    for (int j = 0; j < numsock; ++j) {
+      int fd = nworkers > 1 ? worker_sockets[i][j] : sock[j];
+      if (fd > udp_maxfd) {
+        udp_maxfd = fd;
+      }
+    }
+  }
+  if (rbldnsd_udp_init((unsigned)udp_maxfd + 1) < 0) {
+    error(errno, "cannot allocate UDP accounting");
+  }
+
+  int receive_accounting = 1;
+  for (int i = 0; i < nworkers; ++i) {
+    for (int j = 0; j < numsock; ++j) {
+      if (!rbldnsd_udp_enable(nworkers > 1 ? worker_sockets[i][j] : sock[j])) {
+        receive_accounting = 0;
+      }
+    }
+  }
+
+  rbldnsd_control_transport_support(receive_accounting, 1);
+
+  if (nworkers == 1) {
+    int metrics = rbldnsd_control_slot_alloc(1);
+
+    if (!rbldnsd_control_worker(metrics)) {
+      error(0, "cannot allocate control accounting slot");
+    }
+
+    control_generation = 1;
+    rbldnsd_control_generation(control_generation);
+  }
+
+  /* The controller owns lifecycle events; generations own query workers. */
   static ev_timer supervisor_timer;
   if (nworkers > 1) {
     ev_child_init(&worker_reaper, worker_exited, 0, 0);
     ev_child_start(loop, &worker_reaper);
-    replace_workers(loop);
-    if (worker_ready_fd >= 0) {
-      write(worker_ready_fd, "", 1);
-      close(worker_ready_fd);
-      worker_ready_fd = -1;
+    if (!generation_start(loop)) {
+      error(errno, "unable to start generation");
     }
-    ev_timer_init(&supervisor_timer, worker_supervise, 0.1, 0.1);
+    workers_started = 1;
+    ev_timer_init(&supervisor_timer, generation_supervise, 0.02, 0.02);
     ev_timer_start(loop, &supervisor_timer);
   }
 
-  io_evs = calloc(numsock, sizeof (ev_io));
+  io_evs = calloc(numsock, sizeof(ev_io));
 
   if (io_evs == NULL) {
     oom();
   }
 
-  for(int i = 0; i < numsock; ++i) {
+  for (int i = 0; i < numsock; ++i) {
     make_socket_nonblocking(sock[i]);
     ev_io_init(&io_evs[i], ev_request_handler, sock[i], EV_READ);
-    if (nworkers == 1) ev_io_start(loop, &io_evs[i]);
+    if (nworkers == 1) {
+      ev_io_start(loop, &io_evs[i]);
+    }
   }
 
   static ev_io update_ev;
@@ -2063,8 +2435,8 @@ int main(int argc, char **argv) {
     struct dataset *ds = NULL;
     struct dsfile *dsf = NULL;
 
-    while((ds = nextdataset(ds)) != NULL) {
-      for(dsf = ds->ds_dsf; dsf; dsf = dsf->dsf_next) {
+    while ((ds = nextdataset(ds)) != NULL) {
+      for (dsf = ds->ds_dsf; dsf; dsf = dsf->dsf_next) {
         nds++;
       }
     }
@@ -2078,13 +2450,13 @@ int main(int argc, char **argv) {
     nds = 0;
     ds = NULL;
 
-    while((ds = nextdataset(ds)) != NULL) {
-      for(dsf = ds->ds_dsf; dsf; dsf = dsf->dsf_next) {
+    while ((ds = nextdataset(ds)) != NULL) {
+      for (dsf = ds->ds_dsf; dsf; dsf = dsf->dsf_next) {
         ev_stat_init(&stat_evs[nds], ev_stat_handler, dsf->dsf_name, recheck);
         stat_evs[nds].data = dsf;
         ev_stat_start(loop, &stat_evs[nds]);
         dsf->stat_ev = &stat_evs[nds];
-        nds ++;
+        nds++;
       }
     }
   }
@@ -2092,30 +2464,23 @@ int main(int argc, char **argv) {
   ev_loop(loop, 0);
 
   if (nworkers > 1) {
-    ev_tstamp deadline = ev_time() + 6.0;
-    for (int i = 0; i < nworkers; ++i) {
-      if (workers[i].pid) close(workers[i].control);
-      if (retiring[i].pid) close(retiring[i].control);
-    }
-    for (int i = 0; i < nworkers; ++i) {
-      wait_worker_shutdown(workers[i].pid, deadline);
-      wait_worker_shutdown(retiring[i].pid, deadline);
-      for (int j = 0; j < numsock; ++j)
-        if (i) close(worker_sockets[i][j]);
-    }
+    generation_shutdown();
   }
-  for(int i = 0; i < numsock; ++i) {
+  for (int i = 0; i < numsock; ++i) {
     close(sock[i]);
   }
 
   if (update_sock != -1) {
-    close (update_sock);
+    close(update_sock);
   }
 
+  rbldnsd_overlay_close();
+  rbldnsd_control_close();
+  rbldnsd_ratelimit_close();
   free(io_evs);
   free(stat_evs);
 
-  return 0;
+  return generation_startup_failed ? 1 : 0;
 }
 
 void oom(void) {
