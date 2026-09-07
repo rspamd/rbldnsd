@@ -9,6 +9,7 @@
 #include "rbldnsd_control.h"
 #include "rbldnsd_snapshot.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdatomic.h>
@@ -483,6 +484,37 @@ static int same_path(const char *canonical, const char *path) {
   return same;
 }
 
+static void reset_export_descriptors(void) {
+  long maximum = sysconf(_SC_OPEN_MAX);
+  if (maximum < 0) {
+    maximum = 65536;
+  }
+  for (int fd = 0; fd < maximum; fd++) {
+    close(fd);
+  }
+
+  int sink = open("/dev/null", O_RDWR);
+  if (sink < 0) {
+    /* Chroots need not contain /dev/null. Reserve standard descriptors with
+     * an EOF reader instead, so logging cannot write into a later-opened file.
+     */
+    int descriptors[2];
+    if (pipe(descriptors) < 0) {
+      _exit(1);
+    }
+    close(descriptors[1]);
+    sink = descriptors[0];
+  }
+  for (int fd = 0; fd < 3; fd++) {
+    if (dup2(sink, fd) < 0) {
+      _exit(1);
+    }
+  }
+  if (sink > 2) {
+    close(sink);
+  }
+}
+
 static int export_snapshot(struct overlay_target *state, const char *path,
                            int online) {
   char *destination = canonical_path(path);
@@ -539,13 +571,7 @@ static int export_snapshot(struct overlay_target *state, const char *path,
     signal(SIGHUP, SIG_DFL);
     signal(SIGALRM, SIG_DFL);
     alarm(60);
-    long max = sysconf(_SC_OPEN_MAX);
-    if (max < 0) {
-      max = 65536;
-    }
-    for (int fd = 3; fd < max; fd++) {
-      close(fd);
-    }
+    reset_export_descriptors();
     for (struct dsfile *f = state->dataset->ds_dsf; f; f = f->dsf_next) {
       f->stat_ev = NULL;
       f->dsf_stamp = 0;
