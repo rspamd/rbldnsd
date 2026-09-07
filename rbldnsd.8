@@ -1319,15 +1319,43 @@ modify a mapped file in place. See README.snapshot.md for limits and format.
 .B -O capacity
 with
 .B -M path
-allocates a bounded shared overlay for exactly one dnhash or dnsnapshot
-dataset. The capacity is 1 through 65536 distinct exact names. The control
-commands overlay-status, overlay-put, overlay-del, and overlay-compact use
-explicit expected revision numbers. Deletions are exact exclusions that
-also mask wildcard answers. Updates survive worker replacement and reload,
-but are ephemeral until included in an explicitly compacted snapshot.
-Online compaction requires dnsnapshot; a separate output path supports
-export from either dataset type. See README.overlay.md for command syntax,
-activation, reclamation, and persistence semantics.
+allocates an independent bounded shared overlay for every eligible dnhash or
+dnsnapshot dataset. Capacity is 1 through 65536 distinct exact names per
+dataset; memory therefore scales with both capacity and eligible dataset count.
+Other dataset types can coexist without becoming targets. Dynamic subdatasets
+of combined datasets are not eligible. Zone aliases sharing one dataset share
+one overlay, revision and capacity; multiple eligible datasets in one zone
+remain separate targets.
+.PP
+Use overlay-list to discover stable, 1-based target IDs, dataset specifications
+and zone aliases. Discovery is paginated: follow a nonnegative next_offset with
+overlay-list OFFSET until it is -1. Each page contains at most eight targets;
+specifications and aliases may be truncated with explicit flags and alias count.
+IDs remain stable across reloads; rediscover them after restart or configuration
+changes.
+.PP
+Commands use the explicit selector before the expected revision:
+.nf
+overlay-status @ID
+overlay-put @ID REVISION NAME IPV4 TXT
+overlay-del @ID REVISION NAME
+overlay-compact @ID REVISION [OUTPUT]
+.fi
+The original syntax without @ID is accepted only with one eligible dataset.
+Ambiguous commands and unknown IDs are rejected. Revisions and capacity limits
+are independent per target. Deletions are exact exclusions that also mask
+wildcard answers. Updates survive worker replacement and reload, but are
+ephemeral until included in an explicitly compacted snapshot.
+.PP
+Online compaction requires dnsnapshot and reclaims only the selected target's
+checkpoint after its new base is active and older workers have exited. A
+separate output path supports export from either eligible type without clearing
+the overlay. Export must not overwrite any configured dataset source. Distinct
+dataset objects sharing one source cannot compact it online. Each target may
+have one compaction/export outstanding, with at most eight compiler jobs
+running globally. Retry a rejected start after a job finishes.
+See README.overlay.md for complete
+syntax, discovery bounds, activation and persistence semantics.
 .SH CUSTOMER QUOTAS
 The optional \fB-R file\fR loads a customer quota policy before dropping
 privileges or entering a chroot. It is disabled by default. The file is read
