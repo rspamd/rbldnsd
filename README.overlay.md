@@ -5,8 +5,15 @@ updates, 1 through 65536. Initially the overlay is empty. This mode requires
 exactly one `dnhash` or `dnsnapshot` dataset; IP lists, combined datasets,
 ACL keys, and wildcard updates are not supported. Use `dnsnapshot` for a
 read-only mapped base and online compaction. Memory is fixed at startup:
-a hash table with twice the next power of two of N slots, approximately
-536 bytes per slot. Mutable overlay storage is shared between all workers
+N value slots plus a khash index with at least twice N buckets (rounded to a
+power of two, minimum four). The index reuses the existing DNS hash function.
+On 64-bit platforms each value slot is approximately 532 bytes, with another
+8.25 bytes per index bucket. Its flags and slot pointers use atomic accesses;
+all arrays are allocated in shared mappings before workers fork and never
+resize. Only the controller changes the index, and readers validate its
+publication sequence before accepting a result. Compaction rebuilds the same
+index storage after reclamation, clearing khash's deleted buckets.
+Mutable overlay storage is shared between all workers
 and generations, separate from the base's CoW pages.
 
 Send these commands to the Unix datagram control socket:

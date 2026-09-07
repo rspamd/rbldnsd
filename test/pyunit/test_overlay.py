@@ -178,6 +178,94 @@ class Overlay(test_snapshot.Snapshot):
             if writer is not None:
                 os.close(writer)
 
+    def test_collisions_reclamation_and_concurrent_queries(self):
+        import threading
+
+        # Select colliding keys for both supported dns_label_hash backends,
+        # independent of whether this build enables hardware CRC32-C.
+        groups = {}
+        names = None
+        for number in range(20000):
+            name = f'collision{number}'
+            wire = bytes([len(name)]) + name.encode()
+            fnv = 2166136261
+            crc = 0
+            for byte in wire:
+                fnv = ((fnv ^ byte) * 16777619) & 0xffffffff
+                crc ^= byte
+                for _ in range(8):
+                    crc = (crc >> 1) ^ (0x82f63b78 if crc & 1 else 0)
+            group = groups.setdefault((fnv & 15, crc & 15), [])
+            group.append(name)
+            if len(group) == 24:
+                names = group
+                break
+        self.assertIsNotNone(names, 'failed to select cross-platform collisions')
+
+        _, port = self.start_overlay(capacity=8)
+        revision = 0
+        for command in ['overlay-put 0 guard 127.0.0.2 stable-guard',
+                        'overlay-del 1 a.wild']:
+            revision += 1
+            self.assertEqual(self.command(command)['revision'], revision)
+        stop = threading.Event()
+        errors = []
+        observed = []
+
+        def query_during_updates():
+            try:
+                while not stop.is_set():
+                    for name in ['guard', 'a.wild']:
+                        answer = self.query(port, name)
+                        rcode = answer[3] & 15
+                        if rcode == 2:  # Bounded retry may produce SERVFAIL.
+                            continue
+                        if name == 'guard':
+                            self.assertEqual(rcode, 0)
+                            self.assertIn(b'stable-guard', answer)
+                        else:
+                            self.assertEqual(rcode, 3)
+                            self.assertEqual(int.from_bytes(answer[6:8], 'big'), 0)
+                        observed.append(name)
+            except BaseException as exc:
+                errors.append(exc)
+
+        reader = threading.Thread(target=query_during_updates)
+        reader.start()
+        try:
+            for cycle in range(4):
+                current = names[cycle * 6:(cycle + 1) * 6]
+                if cycle:
+                    for suffix in ['guard 127.0.0.2 stable-guard', None]:
+                        cmd = (f'overlay-put {revision} {suffix}' if suffix else
+                               f'overlay-del {revision} a.wild')
+                        revision += 1
+                        self.assertEqual(self.command(cmd)['revision'], revision)
+                for name in current:
+                    command = f'overlay-put {revision} {name} 127.0.0.3 value-{name}'
+                    revision += 1
+                    self.assertEqual(self.command(command)['revision'], revision)
+                self.assertIn('error', self.command(f'overlay-del {revision} overflow'))
+                self.assertEqual(self.command(f'overlay-del {revision} {current[0]}')['revision'],
+                                 revision + 1)
+                revision += 1
+                self.assertTrue(self.command(f'overlay-compact {revision}')['accepted'])
+                self.wait(lambda: not self.command('overlay-status')['compaction_pending'])
+                self.assertEqual(self.command('overlay-status')['entries'], 0)
+                for previous in range(cycle + 1):
+                    for offset, name in enumerate(names[previous * 6:(previous + 1) * 6]):
+                        answer = self.query(port, name)
+                        if offset:
+                            self.assertIn(f'value-{name}'.encode(), answer)
+                        else:
+                            self.assertEqual(answer[3] & 15, 3)
+        finally:
+            stop.set()
+            reader.join(timeout=3)
+        self.assertFalse(reader.is_alive())
+        self.assertFalse(errors, errors)
+        self.assertGreater(len(observed), 20)
+
     def test_dnhash_updates_export(self):
         _, port = self.start_overlay('dnhash')
         self.command('overlay-put 0 fresh 127.0.0.2 fresh')

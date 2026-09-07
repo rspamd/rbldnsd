@@ -2,10 +2,15 @@
 #define RBLDNSD_OVERLAY_H
 #include <stdint.h>
 struct ev_loop;
+struct dataset;
+struct dnsqinfo;
+struct dnspacket;
 /* Exactly one domain dataset, controller-owned writes, shared atomic reads. */
-int rbldnsd_overlay_init(struct ev_loop *, unsigned capacity, void (*action)(int));
+int rbldnsd_overlay_init(struct ev_loop *, unsigned capacity,
+                         void (*action)(int));
 /* -1 means no override; 0 is an exclusion, positive is NSQUERY_FOUND. */
-int rbldnsd_overlay_query(const struct dataset *, const struct dnsqinfo *, struct dnspacket *);
+int rbldnsd_overlay_query(const struct dataset *, const struct dnsqinfo *,
+                          struct dnspacket *);
 void rbldnsd_overlay_close(void);
 /* Call in a fork child before destroying the inherited event loop. */
 void rbldnsd_overlay_child(void);
