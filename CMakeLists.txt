@@ -24,6 +24,8 @@ test_big_endian(IS_BIG_ENDIAN)
 include(Toolset)
 include(Sanitizer)
 include(CheckFunctionExists)
+include(CheckSymbolExists)
+include(CheckIncludeFile)
 include(CheckCCompilerFlag)
 include(AsmOp)
 include(FindArch)
@@ -34,6 +36,15 @@ find_package(AWK REQUIRED)
 
 
 check_function_exists(setitimer HAVE_SETITIMER)
+
+check_include_file(sys/random.h HAVE_SYS_RANDOM_H)
+if(HAVE_SYS_RANDOM_H)
+  check_symbol_exists(getrandom "sys/random.h" HAVE_GETRANDOM)
+  check_symbol_exists(getentropy "sys/random.h;unistd.h" HAVE_GETENTROPY)
+else()
+  check_symbol_exists(getentropy "unistd.h" HAVE_GETENTROPY)
+endif()
+
 
 IF(ENABLE_JEMALLOC MATCHES "ON")
     ProcessPackage(JEMALLOC LIBRARY jemalloc_pic jemalloc INCLUDE jemalloc.h INCLUDE_SUFFIXES include/jemalloc
@@ -80,6 +91,7 @@ add_executable(rbldnsd
         rbldnsd_control.c
         rbldnsd_udp.c
         rbldnsd_ratelimit.c
+        contrib/siphash/siphash.c
         rbldnsd_acl.c
         rbldnsd_aclkey.c
         rbldnsd_combined.c

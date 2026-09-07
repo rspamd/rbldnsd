@@ -1333,6 +1333,13 @@ The optional \fB-R file\fR loads a customer quota policy before dropping
 privileges or entering a chroot. It is disabled by default. The file is read
 only at startup; changing policy requires a restart. Zone reloads and worker
 replacement deliberately preserve quota debt.
+The quota bucket hash uses the bundled upstream SipHash-2-4 reference
+implementation with a 128-bit secret generated once before privilege dropping
+and inherited by all workers. Entropy comes from getrandom or getentropy when
+available. Interrupted operations and partial reads are retried; /dev/urandom
+is used only when these interfaces are unavailable. Entropy errors abort
+startup instead of initializing predictable bucket assignments.
+
 .PP
 Each non-comment line specifies a scope, selector, requests per second, and
 burst capacity, separated by whitespace. Rates and bursts are positive integers

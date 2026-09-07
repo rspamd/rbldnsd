@@ -27,16 +27,25 @@ class Accounting(unittest.TestCase):
         lib = str(pathlib.Path(cls.build.name) / 'quota.so')
         shim = pathlib.Path(cls.build.name) / 'quota_test.c'
         shim.write_text('#include "' + str(ROOT / 'rbldnsd_ratelimit.c') + '"\n'
+                        '#include "' + str(ROOT / 'contrib/siphash/vectors.h') + '"\n'
                         'void quota_test_seed(void) {\n'
-                        ' secret[0]=UINT64_C(0x0706050403020100);\n'
-                        ' secret[1]=UINT64_C(0x0f0e0d0c0b0a0908); }\n'
+                        '  for (unsigned i = 0; i < sizeof(secret); ++i) {\n'
+                        '    secret[i] = (unsigned char)i;\n'
+                        '  }\n'
+                        '}\n'
+                        'void quota_test_vector(unsigned n, unsigned char *output) {\n'
+                        '  memcpy(output, vectors_sip64[n], 8);\n'
+                        '}\n'
                         'uint64_t quota_test_hash(const unsigned char *p, size_t n) {\n'
-                        ' return bucket_hash(p,n); }\n')
+                        '  return bucket_hash(p, n);\n'
+                        '}\n')
         subprocess.run([*shlex.split(os.environ.get('CC', 'cc')), '-std=c11',
                         '-D_DEFAULT_SOURCE', '-shared', '-fPIC', '-O2',
                         *(['-arch', platform.machine()] if platform.system() == 'Darwin' else []),
-                        str(shim), '-o', lib], check=True)
+                        str(shim), str(ROOT / 'contrib/siphash/siphash.c'),
+                        '-o', lib], check=True)
         cls.lib = ctypes.CDLL(lib)
+        cls.lib.quota_test_vector.argtypes = [ctypes.c_uint, ctypes.c_void_p]
         cls.lib.quota_test_hash.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
         cls.lib.quota_test_hash.restype = ctypes.c_uint64
         cls.lib.rbldnsd_ratelimit_init.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t]
@@ -56,7 +65,7 @@ class Accounting(unittest.TestCase):
             err = ctypes.create_string_buffer(160)
             result = self.lib.rbldnsd_ratelimit_init(f.name.encode(), err, len(err))
         self.assertEqual(result, 0 if valid else -1, err.value)
-        self.lib.quota_test_seed() # Deterministic collisions, production uses urandom.
+        self.lib.quota_test_seed() # Deterministic collisions; production uses operating-system entropy.
 
     def check(self, now=0, zone=b'example.test', key=None, address=None):
         peer = None
@@ -71,10 +80,12 @@ class Accounting(unittest.TestCase):
 
     def test_siphash_vectors(self):
         self.lib.quota_test_seed()
-        expected = [0x726fdb47dd0e0e31, 0x74f839c593dc67fd,
-                    0x0d6c8009d9a94f5a, 0x85676696d7fb7e2d]
-        for n, value in enumerate(expected):
-            self.assertEqual(self.lib.quota_test_hash(bytes(range(n)), n), value)
+        expected = ctypes.create_string_buffer(8)
+        for n in range(64):
+            with self.subTest(length=n):
+                self.lib.quota_test_vector(n, expected)
+                self.assertEqual(self.lib.quota_test_hash(bytes(range(n)), n),
+                                 int.from_bytes(expected.raw, 'little'))
 
     def test_burst_refill_and_zone_normalization(self):
         self.policy('zone EXAMPLE.TEST. 2 3\n')

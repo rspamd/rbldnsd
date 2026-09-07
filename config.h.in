@@ -9,6 +9,9 @@
 #cmakedefine NO_ZLIB 1
 #define VERSION "${RBLDNSD_VERSION}"
 #cmakedefine HAVE_SETITIMER 1
+#cmakedefine HAVE_SYS_RANDOM_H 1
+#cmakedefine HAVE_GETRANDOM 1
+#cmakedefine HAVE_GETENTROPY 1
 #cmakedefine WITH_JEMALLOC 1
 #cmakedefine WITH_RECVMMSG 1
 #endif
