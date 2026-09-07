@@ -9,15 +9,21 @@ Main changes from the original source:
 * **Vectorized Datagram Processing**: vectorized processing of incoming datagrams allows a single CPU core to handle around 300,000 RPS (Requests Per Second).
 * **Embedded jemalloc**: The addition of embedded jemalloc support brings along insightful memory usage statistics, ensuring you have a comprehensive overview of resource utilization.
 * **ACL Zone - aclkey**: Added the `aclkey` zone-helper that allows key-based access to your DNS data, enabling resolution of addresses like 1.0.0.127.<KEY>.zone.com, where key corresponds to a designated DNS label.
+* **Multiple UDP Workers**: `-W` distributes queries across separate `SO_REUSEPORT` sockets while sharing loaded zone pages through fork and copy-on-write. See [multiple UDP workers](#multiple-udp-workers).
+* **Transactional Reloads**: isolated loaders prepare complete replacement generations before old workers retire. Failed or timed-out loads preserve service, and retired zone memory is reclaimed even when datasets shrink.
+* **Local Control and Shared Metrics**: `-M` provides an owner-only Unix datagram socket for JSON status, statistics, reload, and shutdown commands. Aggregate counters survive worker replacement and crashes. See [control and accounting](#local-control-and-worker-accounting).
+* **Compiled Domain Snapshots**: the `-B` compiler produces portable `dnsnapshot` datasets served through read-only memory mappings, preserving domain answers, wildcards, exclusions, and metadata. See [snapshot documentation](README.snapshot.md).
+* **Bounded UDP Sends and Drop Accounting**: partial batches and send failures are handled without busy retry loops. Shared counters track discarded replies and, on Linux, socket receive-queue overflow.
+* **Shared Customer Quotas**: `-R` limits requests by authenticated ACL key, source prefix, or zone. Bounded shared accounting preserves quota debt across workers, reloads, and crashes. See [the manual](rbldnsd.8).
+* **Incremental Domain Updates**: `-O` adds bounded shared overlays with revision-checked additions and exclusions for one domain dataset. Online `dnsnapshot` compaction persists updates and reclaims overlay capacity while queries continue. Updates remain ephemeral until compacted. See [overlay documentation](README.overlay.md).
 
 This project has been supported by [Abusix](https://abusix.com/).
 
 TODO:
 
-1. Rate limits using leaky bucket model
-2. Hyperscan based regexp backend
-3. eBPF filters to optimise UDP worker flows
-4. Better documentation
+1. Hyperscan based regexp backend
+2. eBPF filters to optimise UDP worker flows
+3. Better documentation
 
 The current source tree has been forked from https://github.com/spamhaus/rbldnsd and is now maintained by Vsevolod Stakhov.
 The original source was written originally by Michael Tokarev <mjt+rbldnsd@corpit.ru>
