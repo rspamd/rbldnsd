@@ -4,7 +4,6 @@ local imagemap = {
   'centos-8': 'almalinux:8',
   'centos-9': 'almalinux:9',
   'centos-10': 'almalinux:10',
-  'debian-bullseye': 'debian:bullseye',
   'debian-bookworm': 'debian:bookworm',
   'debian-trixie': 'debian:trixie',
   'ubuntu-jammy': 'ubuntu:22.04',

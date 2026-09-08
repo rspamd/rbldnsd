@@ -184,52 +184,6 @@
             "revision": "${{ needs.debian-bookworm-build-X64.outputs.revision }}"
          }
       },
-      "debian-bullseye-build-ARM64": {
-         "if": "${{ (inputs.distributions == '' || contains(format(',{0},', inputs.distributions), format(',{0},', 'debian-bullseye'))) && (inputs.architectures == '' || contains(format(',{0},', inputs.architectures), format(',{0},', 'ARM64'))) }}",
-         "uses": "./.github/workflows/build_packages.yml",
-         "with": {
-            "branch": "${{ inputs.branch }}",
-            "experimental": "${{ inputs.experimental }}",
-            "name": "debian-bullseye",
-            "platform": "ARM64",
-            "repo": "${{ inputs.repo }}",
-            "version": "${{ inputs.version }}"
-         }
-      },
-      "debian-bullseye-build-X64": {
-         "if": "${{ (inputs.distributions == '' || contains(format(',{0},', inputs.distributions), format(',{0},', 'debian-bullseye'))) && (inputs.architectures == '' || contains(format(',{0},', inputs.architectures), format(',{0},', 'X64'))) }}",
-         "uses": "./.github/workflows/build_packages.yml",
-         "with": {
-            "branch": "${{ inputs.branch }}",
-            "experimental": "${{ inputs.experimental }}",
-            "name": "debian-bullseye",
-            "platform": "X64",
-            "repo": "${{ inputs.repo }}",
-            "version": "${{ inputs.version }}"
-         }
-      },
-      "debian-bullseye-test-ARM64": {
-         "if": "${{ (inputs.distributions == '' || contains(format(',{0},', inputs.distributions), format(',{0},', 'debian-bullseye'))) && (inputs.architectures == '' || contains(format(',{0},', inputs.architectures), format(',{0},', 'ARM64'))) && !(vars.SKIP_TESTS || vars.SKIP_TESTS_DEBIAN_BULLSEYE) }}",
-         "needs": "debian-bullseye-build-ARM64",
-         "uses": "./.github/workflows/test_package.yml",
-         "with": {
-            "image": "debian:bullseye",
-            "name": "debian-bullseye",
-            "platform": "ARM64",
-            "revision": "${{ needs.debian-bullseye-build-ARM64.outputs.revision }}"
-         }
-      },
-      "debian-bullseye-test-X64": {
-         "if": "${{ (inputs.distributions == '' || contains(format(',{0},', inputs.distributions), format(',{0},', 'debian-bullseye'))) && (inputs.architectures == '' || contains(format(',{0},', inputs.architectures), format(',{0},', 'X64'))) && !(vars.SKIP_TESTS || vars.SKIP_TESTS_DEBIAN_BULLSEYE) }}",
-         "needs": "debian-bullseye-build-X64",
-         "uses": "./.github/workflows/test_package.yml",
-         "with": {
-            "image": "debian:bullseye",
-            "name": "debian-bullseye",
-            "platform": "X64",
-            "revision": "${{ needs.debian-bullseye-build-X64.outputs.revision }}"
-         }
-      },
       "debian-trixie-build-ARM64": {
          "if": "${{ (inputs.distributions == '' || contains(format(',{0},', inputs.distributions), format(',{0},', 'debian-trixie'))) && (inputs.architectures == '' || contains(format(',{0},', inputs.architectures), format(',{0},', 'ARM64'))) }}",
          "uses": "./.github/workflows/build_packages.yml",
