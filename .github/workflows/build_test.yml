@@ -321,6 +321,52 @@
             "platform": "X64",
             "revision": "${{ needs.ubuntu-noble-build-X64.outputs.revision }}"
          }
+      },
+      "ubuntu-resolute-build-ARM64": {
+         "if": "${{ (inputs.distributions == '' || contains(format(',{0},', inputs.distributions), format(',{0},', 'ubuntu-resolute'))) && (inputs.architectures == '' || contains(format(',{0},', inputs.architectures), format(',{0},', 'ARM64'))) }}",
+         "uses": "./.github/workflows/build_packages.yml",
+         "with": {
+            "branch": "${{ inputs.branch }}",
+            "experimental": "${{ inputs.experimental }}",
+            "name": "ubuntu-resolute",
+            "platform": "ARM64",
+            "repo": "${{ inputs.repo }}",
+            "version": "${{ inputs.version }}"
+         }
+      },
+      "ubuntu-resolute-build-X64": {
+         "if": "${{ (inputs.distributions == '' || contains(format(',{0},', inputs.distributions), format(',{0},', 'ubuntu-resolute'))) && (inputs.architectures == '' || contains(format(',{0},', inputs.architectures), format(',{0},', 'X64'))) }}",
+         "uses": "./.github/workflows/build_packages.yml",
+         "with": {
+            "branch": "${{ inputs.branch }}",
+            "experimental": "${{ inputs.experimental }}",
+            "name": "ubuntu-resolute",
+            "platform": "X64",
+            "repo": "${{ inputs.repo }}",
+            "version": "${{ inputs.version }}"
+         }
+      },
+      "ubuntu-resolute-test-ARM64": {
+         "if": "${{ (inputs.distributions == '' || contains(format(',{0},', inputs.distributions), format(',{0},', 'ubuntu-resolute'))) && (inputs.architectures == '' || contains(format(',{0},', inputs.architectures), format(',{0},', 'ARM64'))) && !(vars.SKIP_TESTS || vars.SKIP_TESTS_UBUNTU_RESOLUTE) }}",
+         "needs": "ubuntu-resolute-build-ARM64",
+         "uses": "./.github/workflows/test_package.yml",
+         "with": {
+            "image": "ubuntu:26.04",
+            "name": "ubuntu-resolute",
+            "platform": "ARM64",
+            "revision": "${{ needs.ubuntu-resolute-build-ARM64.outputs.revision }}"
+         }
+      },
+      "ubuntu-resolute-test-X64": {
+         "if": "${{ (inputs.distributions == '' || contains(format(',{0},', inputs.distributions), format(',{0},', 'ubuntu-resolute'))) && (inputs.architectures == '' || contains(format(',{0},', inputs.architectures), format(',{0},', 'X64'))) && !(vars.SKIP_TESTS || vars.SKIP_TESTS_UBUNTU_RESOLUTE) }}",
+         "needs": "ubuntu-resolute-build-X64",
+         "uses": "./.github/workflows/test_package.yml",
+         "with": {
+            "image": "ubuntu:26.04",
+            "name": "ubuntu-resolute",
+            "platform": "X64",
+            "revision": "${{ needs.ubuntu-resolute-build-X64.outputs.revision }}"
+         }
       }
    },
    "name": "build_test",

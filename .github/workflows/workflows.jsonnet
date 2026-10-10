@@ -8,6 +8,7 @@ local imagemap = {
   'debian-trixie': 'debian:trixie',
   'ubuntu-jammy': 'ubuntu:22.04',
   'ubuntu-noble': 'ubuntu:24.04',
+  'ubuntu-resolute': 'ubuntu:26.04',
 };
 
 local distribs_deb = [
