@@ -9,7 +9,13 @@
 #include "mempool.h"
 
 #define MEMPOOL_CHUNKSIZE (64 * 1024)
-#define ALIGN_SIZE sizeof(void*)
+/* Aligned allocations must be 16-byte aligned: gcc -O3 emits aligned SSE
+ * stores (movaps) for 16-byte struct copies of btrie nodes allocated from
+ * this pool, and those fault on x86-64 when the pointer is only 8-aligned.
+ * malloc() returns 16-byte aligned memory and the chunk header is 16 bytes,
+ * so chunk->buf and chunk->buf + capacity are 16-byte aligned whenever
+ * capacity is a multiple of 16; allocations are carved from the end. */
+#define ALIGN_SIZE 16
 #define ALIGN_MASK (ALIGN_SIZE - 1)
 #define ALIGN_UP(x) (((x) + ALIGN_MASK) & ~ALIGN_MASK)
 
@@ -69,11 +75,14 @@ void *mp_alloc(struct mempool *mp, unsigned size, int align) {
 
   /* Try to fit in existing chunk */
   for (c = mp->mp_chunk; c; c = c->next) {
-    unsigned free_space = c->capacity - c->used;
+    /* Unaligned allocations leave 'used' at an arbitrary offset; pad so an
+     * aligned allocation ends on an ALIGN_SIZE boundary from the chunk end. */
+    unsigned used = align ? ALIGN_UP(c->used) : c->used;
+    unsigned free_space = used <= c->capacity ? c->capacity - used : 0;
     if (free_space >= alloc_size) {
       /* Allocate from end of buffer (grows downward for alignment) */
-      ptr = c->buf + c->capacity - c->used - alloc_size;
-      c->used += alloc_size;
+      ptr = c->buf + c->capacity - used - alloc_size;
+      c->used = used + alloc_size;
       mp->mp_nallocs++;
       mp->mp_datasz += size;
       return ptr;
