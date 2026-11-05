@@ -3,10 +3,13 @@
 ip4range stores IPv4 entries as a sorted array of disjoint ranges built by
 flattening the (nested, possibly overlapping) input at load time. It must be
 indistinguishable from ip4trie for CIDR input: longest prefix wins, `!`
-excludes, per-entry values and @params are honoured. A range listed twice
-takes its last line (ip4trie does that for prefixes held in terminal nodes
-but keeps the first for prefixes inside TBM nodes; ip4range is consistent). Checks, each on a randomly generated nested set of
-CIDRs with values and exclusions:
+excludes, per-entry values and @params are honoured. For a range listed
+more than once an exclusion wins wherever it is in the file, otherwise the
+last line (ip4trie rewrites a duplicate prefix held in a terminal node, so
+there a later listing beats an earlier exclusion, but keeps the first for a
+prefix inside a TBM node; ip4range is consistent and follows the delisting
+intent). Checks, each on a randomly generated nested set of CIDRs with
+values and exclusions:
 
 - every address of the covered window and some addresses outside it return
   the same A and TXT (or NXDOMAIN) from both dataset types;
@@ -17,6 +20,7 @@ CIDRs with values and exclusions:
   dump_ip4range() helper on arbitrary range shapes);
 - the same input shuffled gives the same answers (ip4range sorts on load,
   and the load log says so);
+- for duplicated ranges an exclusion wins, otherwise the last line;
 - a.b.c.d-e.f.g.h ranges, which ip4trie does not accept, follow the same rule
   generalised: the latest-starting entry covering an address wins.
 
@@ -86,13 +90,18 @@ def with_duplicate_hosts(rnd, entries):
 
 def oracle(entries):
     """{address: A} for every listed address of the window: longest prefix
-    wins, exclusions remove, computed independently of rbldnsd."""
+    wins; among identical ranges an exclusion wins, else the last line;
+    computed independently of rbldnsd."""
     listed = {}
     for n in range(WINDOW_BASE, WINDOW_BASE + WINDOW_SIZE):
         best = None
-        for start, bits, excluded, value in entries:      # later lines override equal ranges
-            if start <= n < start + (1 << (32 - bits)) and (best is None or bits >= best[1]):
+        for start, bits, excluded, value in entries:
+            if not start <= n < start + (1 << (32 - bits)):
+                continue
+            if best is None or bits > best[1]:
                 best = (start, bits, excluded, value)
+            elif bits == best[1] and not best[2]:
+                best = (start, bits, excluded, value)   # later line of the same range, unless an exclusion already won
         if best and not best[2]:
             listed[n] = best[3].split(':')[1] if best[3] else '127.0.0.2'
     return listed
@@ -234,7 +243,7 @@ class Ip4Range(unittest.TestCase):
                 expected = oracle(entries)
                 for n in sorted(duplicated):
                     self.assertEqual(rng.query(reverse(n), 1), expected.get(n),
-                                     f'seed {seed}: duplicated host {ip(n)}: last line must win')
+                                     f'seed {seed}: duplicated host {ip(n)}: exclusion, else last line, must win')
                 self.assertTrue(dumped, f'seed {seed}: empty -d dump')
                 for n in sorted(set(dumped) | set(expected)):
                     self.assertEqual(dumped.get(n), expected.get(n),
@@ -258,9 +267,13 @@ $DATASET ip4range:set @
 10.1.1.0/24
 !10.1.1.128/25
 10.1.1.0/24 :127.0.0.7:dup
+!10.1.3.7
+10.1.3.7 :127.0.0.8:relisted-same-range
+10.1.3.8 :127.0.0.8:listed-first
+!10.1.3.8
 """
         d = self.start('plain', text)
-        self.assertIn('x=2 dups=1 ', d.read_log())
+        self.assertIn('x=4 dups=3 ', d.read_log())
         expect = {
             '10.1.0.3': ('127.0.0.2', b'default'),
             '10.1.0.5': ('127.0.0.5', b'overlap'),
@@ -273,6 +286,8 @@ $DATASET ip4range:set @
             '10.1.0.36': ('127.0.0.2', b'default'),
             '10.1.1.1': ('127.0.0.7', b'dup'),        # duplicate /24: last line wins
             '10.1.1.200': (None, None),
+            '10.1.3.7': (None, None),                  # same range: exclusion wins over the later listing
+            '10.1.3.8': (None, None),                  # same range: exclusion wins over the earlier listing
             '10.1.2.1': (None, None),
         }
         for addr, (a, txt) in expect.items():

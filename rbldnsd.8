@@ -613,7 +613,8 @@ single pass instead of one trie insertion per entry.  A file that is sorted
 by address loads fastest; an unsorted file is sorted first.  The input lines
 are kept in a temporary array (12 bytes per line) until the end of the load.
 For ranges that are not CIDRs, the entry that starts latest wins where two
-overlap.  When the same range is listed more than once, the last line wins.
+overlap.  When the same range appears more than once, an exclusion wins over
+listings wherever it is in the file; otherwise the last line wins.
 With the environment variable \fBRBLDNSD_IP4RANGE_DEBUG\fR set, every stored
 range is printed to stderr after loading.
 

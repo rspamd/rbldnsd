@@ -4,9 +4,12 @@
  * Semantics follow ip4trie: when entries nest, the most specific one wins
  * (for ranges that are not CIDRs: the latest-starting entry covering the
  * address, then the shortest), `!` exclusions remove addresses from any
- * enclosing entry, and when the same range is listed twice the last line
- * wins (what ip4trie does for a prefix held in a terminal node; for one held
- * inside a TBM node it keeps the first, which this dataset does not copy). The nested input is flattened at load time into disjoint
+ * enclosing entry. When the same range appears more than once, an exclusion
+ * wins over listings (a delisting line is meant to win wherever it is in the
+ * file), otherwise the last line wins. ip4trie is not consistent there: it
+ * rewrites the data for a duplicate prefix held in a terminal node, so a
+ * later listing overrides an earlier exclusion, but keeps the first for a
+ * prefix held inside a TBM node. The nested input is flattened at load time into disjoint
  * ranges and adjacent ranges with the same value are merged, so a lookup is
  * one binary search narrowed by an index on the top 16 bits of the address.
  *
@@ -285,9 +288,19 @@ static int ds_ip4range_flatten(struct dsdata *dsd) {
 
   for (i = 0; i < dsd->nraw; i++) {
     const struct raw *e = dsd->raw + i;
-    if (i + 1 < dsd->nraw && e[1].lo == e->lo && e[1].hi == e->hi) {
-      dsd->ndups++;             /* same range listed again later: last wins */
-      continue;
+    unsigned j = i, pick;
+    /* a run of identical ranges: an exclusion wins, else the last line */
+    while (j + 1 < dsd->nraw && dsd->raw[j + 1].lo == e->lo && dsd->raw[j + 1].hi == e->hi)
+      j++;
+    if (j > i) {
+      dsd->ndups += j - i;
+      for (pick = i; pick <= j; pick++)
+        if (dsd->raw[pick].meta == META_EXCLUDED)
+          break;
+      if (pick > j)
+        pick = j;
+      e = dsd->raw + pick;
+      i = j;
     }
     if (e->lo && !ds_ip4range_fill(dsd, stack, &sn, &pos, (uint64_t)e->lo - 1))
       goto done;
@@ -297,7 +310,7 @@ static int ds_ip4range_flatten(struct dsdata *dsd) {
       if (!stack)
         goto done;
     }
-    stack[sn++] = i;
+    stack[sn++] = (unsigned)(e - dsd->raw);
   }
   if (!ds_ip4range_fill(dsd, stack, &sn, &pos, 0xffffffffu))
     goto done;
