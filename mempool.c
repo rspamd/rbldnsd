@@ -9,10 +9,12 @@
 #include <string.h>
 #include "mempool.h"
 
-/* Total size of a regular chunk, header included, so that each chunk is
- * exactly one 64K allocation: jemalloc (and macOS malloc with 16K pages)
- * would round 64K plus the header up to an 80K size class. */
-#define MEMPOOL_CHUNKSIZE (64 * 1024)
+/* Total size of a regular chunk, header included, kept just under 64K so a
+ * chunk fits one allocator size class everywhere: jemalloc and macOS malloc
+ * round anything above 64K up to 80K, and musl's mallocng fits at most
+ * 65516 bytes (a 65520-byte slot minus its 4-byte in-band header) before
+ * jumping to its 74880-byte class. glibc does not round these sizes. */
+#define MEMPOOL_CHUNKSIZE (64 * 1024 - 32)
 /* Aligned allocations must be 16-byte aligned: gcc -O3 emits aligned SSE
  * stores (movaps) for 16-byte struct copies of btrie nodes allocated from
  * this pool, and those fault on x86-64 when the pointer is only 8-aligned.
