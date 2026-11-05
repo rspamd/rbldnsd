@@ -130,3 +130,6 @@ install(TARGETS rbldnsd RUNTIME DESTINATION sbin)
 add_executable(test_control_slots test/control_slots.c rbldnsd_control.c)
 target_compile_definitions(test_control_slots PRIVATE RBLDNSD_CONTROL_TESTING)
 target_link_libraries(test_control_slots ${RSPAMD_REQUIRED_LIBRARIES} ${CMAKE_REQUIRED_LIBRARIES})
+# Regression for mempool alignment: aligned allocations must stay aligned
+# after unaligned ones (x86-64 SIGSEGV on the first trie dataset otherwise).
+add_executable(test_mempool_align test/mempool_align.c mempool.c)
