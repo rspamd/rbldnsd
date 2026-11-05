@@ -237,6 +237,7 @@ struct dstype {	/* dst */
 declaredstype(ip4set);
 declaredstype(ip4tset);
 declaredstype(ip4trie);
+declaredstype(ip4range);
 declaredstype(ip6tset);
 declaredstype(ip6trie);
 declaredstype(dnset);
