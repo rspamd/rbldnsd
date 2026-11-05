@@ -9,6 +9,9 @@
 #include <string.h>
 #include "mempool.h"
 
+/* Total size of a regular chunk, header included, so that each chunk is
+ * exactly one 64K allocation: jemalloc (and macOS malloc with 16K pages)
+ * would round 64K plus the header up to an 80K size class. */
 #define MEMPOOL_CHUNKSIZE (64 * 1024)
 /* Aligned allocations must be 16-byte aligned: gcc -O3 emits aligned SSE
  * stores (movaps) for 16-byte struct copies of btrie nodes allocated from
@@ -115,7 +118,7 @@ void *mp_alloc(struct mempool *mp, unsigned size, int align) {
 
   /* Need new chunk; always fits since alloc_size < MEMPOOL_CHUNKSIZE / 2 */
   if (!ptr) {
-    c = mp_newchunk(mp, MEMPOOL_CHUNKSIZE);
+    c = mp_newchunk(mp, MEMPOOL_CHUNKSIZE - sizeof(struct mempool_chunk));
     if (!c)
       return NULL;
     ptr = mp_carve(c, alloc_size, align);
