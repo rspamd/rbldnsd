@@ -15,11 +15,13 @@ Two checks:
   entries with @params answer exactly as before, for ip4trie and ip6trie.
   A shared struct must not leak one entry's value or params into another.
 
-- memory (glibc builds only, where "zones reloaded" logs mallinfo): the
-  per-entry memory outside the trie itself, i.e. the heap growth between a
-  50k-entry and a 150k-entry default-valued ip4trie minus the growth of the
-  trie reported by btrie_stats, must be under 4 bytes. It is 16 bytes per
-  entry without the fix.
+- memory (glibc and jemalloc builds, where "zones reloaded" logs the heap
+  in use; skipped on other allocators): the per-entry memory outside the
+  trie itself, i.e. the heap growth between a 50k-entry and a 150k-entry
+  default-valued ip4trie minus the growth of the trie reported by
+  btrie_stats, must be under 8 bytes (allocator rounding of the pool chunks
+  accounts for up to 5 on jemalloc). It is 16 bytes per entry without the
+  fix.
 
 RBLDNSD=/path/to/rbldnsd python3 test/pyunit/test_trie_meta_sharing.py
 """
@@ -99,7 +101,10 @@ V6_EXPECTED = [
 ]
 
 SMALL, LARGE = 50000, 150000
-MAX_OVERHEAD_BYTES_PER_ENTRY = 4
+# A per-entry struct is 16 bytes. Allow for allocator rounding of the pool's
+# 64 KB-plus-header chunks: jemalloc puts them in its 80 KB size class, which
+# shows up as about 5 bytes per entry of apparent overhead; glibc shows under 1.
+MAX_OVERHEAD_BYTES_PER_ENTRY = 8
 
 
 def reverse_ip4(addr):
@@ -227,14 +232,19 @@ class TrieMetaSharing(unittest.TestCase):
                 self.fail(f'rbldnsd exited with {code} while loading {n} entries:\n{log}')
             time.sleep(0.2)
         self.stop()
-        m = re.search(r'mem arena=(\d+) free=(\d+) mmap=(\d+) Kb', log)
-        if not m:
-            self.skipTest('rbldnsd does not log mallinfo on "zones reloaded" '
-                          '(not glibc, or built with NO_MEMINFO):\n' + log)
-        arena, free, mmap = (int(x) for x in m.groups())
+        m = re.search(r'mem arena=(\d+) free=(\d+) mmap=(\d+) Kb', log)  # glibc mallinfo
+        if m:
+            arena, free, mmap = (int(x) for x in m.groups())
+            heap = arena - free + mmap
+        else:
+            m = re.search(r'mem allocated=(\d+) active=\d+ resident=\d+ Kb', log)  # jemalloc
+            if not m:
+                self.skipTest('rbldnsd does not log heap usage on "zones reloaded" '
+                              '(neither glibc nor jemalloc, or built with NO_MEMINFO):\n' + log)
+            heap = int(m.group(1))
         t = re.search(r'ip4trie:big:.*\bmem=(\d+)k', log)
         self.assertIsNotNone(t, 'no btrie_stats line for ip4trie:big in:\n' + log)
-        return arena - free + mmap, int(t.group(1))
+        return heap, int(t.group(1))
 
     def test_default_valued_entries_cost_no_memory_outside_the_trie(self):
         heap_small, trie_small = self.measure(SMALL)
