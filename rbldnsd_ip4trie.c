@@ -11,6 +11,10 @@
 struct dsdata {
   struct btrie *btrie;
   const char *def_rr;	/* default RR */
+  const struct entry_meta *last_meta; /* last (rr, params) pair, shared by
+                                       * consecutive entries with the same
+                                       * values (the common case: one default
+                                       * value for the whole dataset) */
 };
 
 definedstype_update(ip4trie, DSTF_IP4REV, "set of (ip4cidr or ip6cidr, value) pairs");
@@ -110,12 +114,16 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
       return 0;
   }
 
-  struct entry_meta *meta = mp_alloc(ds->ds_mp, sizeof(*meta), 1);
-  if (!meta) {
-    return 0;
+  const struct entry_meta *meta = dsd->last_meta;
+  if (!meta || meta->rr != rr || meta->params != params) {
+    struct entry_meta *m = mp_alloc(ds->ds_mp, sizeof(*m), 1);
+    if (!m) {
+      return 0;
+    }
+    m->rr = rr;
+    m->params = params;
+    dsd->last_meta = meta = m;
   }
-  meta->rr = rr;
-  meta->params = params;
 
   int ret = -1;
 
