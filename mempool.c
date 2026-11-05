@@ -4,12 +4,24 @@
  * All memory is freed at once via mp_free().
  */
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include "mempool.h"
 
-#define MEMPOOL_CHUNKSIZE (64 * 1024)
-#define ALIGN_SIZE sizeof(void*)
+/* Total size of a regular chunk, header included, kept just under 64K so a
+ * chunk fits one allocator size class everywhere: jemalloc and macOS malloc
+ * round anything above 64K up to 80K, and musl's mallocng fits at most
+ * 65516 bytes (a 65520-byte slot minus its 4-byte in-band header) before
+ * jumping to its 74880-byte class. glibc does not round these sizes. */
+#define MEMPOOL_CHUNKSIZE (64 * 1024 - 32)
+/* Aligned allocations must be 16-byte aligned: gcc -O3 emits aligned SSE
+ * stores (movaps) for 16-byte struct copies of btrie nodes allocated from
+ * this pool, and those fault on x86-64 when the pointer is only 8-aligned.
+ * Alignment is applied to the address itself (see mp_carve()): neither the
+ * chunk header size (12 bytes on 32-bit) nor malloc()'s alignment (8 on
+ * armhf glibc) is the same everywhere, so offsets alone cannot be trusted. */
+#define ALIGN_SIZE 16
 #define ALIGN_MASK (ALIGN_SIZE - 1)
 #define ALIGN_UP(x) (((x) + ALIGN_MASK) & ~ALIGN_MASK)
 
@@ -22,7 +34,8 @@ void *emalloc(size_t size);
 struct mempool_chunk {
   struct mempool_chunk *next;
   unsigned capacity;  /* total buffer size */
-  unsigned used;      /* bytes used from end of buffer */
+  unsigned used;      /* bytes used in total (front + back) */
+  unsigned front;     /* bytes used from the start by unaligned allocations */
   char buf[];         /* flexible array member */
 };
 
@@ -40,49 +53,75 @@ static struct mempool_chunk *mp_newchunk(struct mempool *mp, unsigned capacity) 
   c->next = mp->mp_chunk;
   c->capacity = capacity;
   c->used = 0;
+  c->front = 0;
   mp->mp_chunk = c;
   return c;
+}
+
+/*
+ * Carve alloc_size bytes from the free space in the middle of a chunk.
+ * Unaligned allocations (strings, RR data) grow upward from the start and
+ * aligned ones (structs) grow downward from the end, so the two never
+ * interleave: aligned sizes are multiples of ALIGN_SIZE, and only the first
+ * aligned allocation in a chunk may need padding to round its address down.
+ * Returns NULL if it does not fit.
+ */
+static char *mp_carve(struct mempool_chunk *c, unsigned alloc_size, int align) {
+  unsigned free_space = c->capacity - c->used;
+  unsigned pad;
+  char *ptr;
+
+  if (free_space < alloc_size)
+    return NULL;
+  if (!align) {
+    /* unaligned allocations grow upward from the start of the buffer */
+    ptr = c->buf + c->front;
+    c->front += alloc_size;
+    c->used += alloc_size;
+    return ptr;
+  }
+  /* aligned allocations grow downward from the end of the buffer */
+  ptr = c->buf + c->capacity - (c->used - c->front) - alloc_size;
+  pad = (unsigned)((uintptr_t)ptr & ALIGN_MASK);
+  if (free_space - alloc_size < pad)
+    return NULL;
+  c->used += alloc_size + pad;
+  return ptr - pad;
 }
 
 void *mp_alloc(struct mempool *mp, unsigned size, int align) {
   struct mempool_chunk *c;
   unsigned alloc_size;
-  char *ptr;
+  char *ptr = NULL;
 
   if (align)
     alloc_size = ALIGN_UP(size);
   else
     alloc_size = size;
 
-  /* Large allocation: dedicated chunk */
+  /* Large allocation: dedicated chunk, with room to align its address */
   if (alloc_size >= MEMPOOL_CHUNKSIZE / 2) {
-    c = mp_newchunk(mp, alloc_size);
+    c = mp_newchunk(mp, align ? alloc_size + ALIGN_MASK : alloc_size);
     if (!c)
       return NULL;
-    c->used = alloc_size;
-    return c->buf;
+    return mp_carve(c, alloc_size, align);
   }
 
   /* Try to fit in existing chunk */
   for (c = mp->mp_chunk; c; c = c->next) {
-    unsigned free_space = c->capacity - c->used;
-    if (free_space >= alloc_size) {
-      /* Allocate from end of buffer (grows downward for alignment) */
-      ptr = c->buf + c->capacity - c->used - alloc_size;
-      c->used += alloc_size;
-      mp->mp_nallocs++;
-      mp->mp_datasz += size;
-      return ptr;
-    }
+    ptr = mp_carve(c, alloc_size, align);
+    if (ptr)
+      break;
   }
 
-  /* Need new chunk */
-  c = mp_newchunk(mp, MEMPOOL_CHUNKSIZE);
-  if (!c)
-    return NULL;
+  /* Need new chunk; always fits since alloc_size < MEMPOOL_CHUNKSIZE / 2 */
+  if (!ptr) {
+    c = mp_newchunk(mp, MEMPOOL_CHUNKSIZE - sizeof(struct mempool_chunk));
+    if (!c)
+      return NULL;
+    ptr = mp_carve(c, alloc_size, align);
+  }
 
-  ptr = c->buf + c->capacity - alloc_size;
-  c->used = alloc_size;
   mp->mp_nallocs++;
   mp->mp_datasz += size;
   return ptr;
