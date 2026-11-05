@@ -230,22 +230,15 @@ char *rbldnsd_split_entry_params(char *s, char **params_out) {
   return s;
 }
 
-const struct kv_params *rbldnsd_parse_kv_params(struct mempool *mp,
-                                                struct dsctx *dsc,
-                                                const char *s) {
-  if (!s) {
-    return NULL;
-  }
-  while (ISSPACE(*s)) {
-    s++;
-  }
-  if (!*s || ISCOMMENT(*s)) {
-    return NULL;
-  }
+/* Parse non-empty params text s. Returns 0 only on allocation failure;
+ * *out is NULL when no valid key remains. */
+static int parse_kv_params(struct mempool *mp, struct dsctx *dsc,
+                           const char *s, const struct kv_params **out) {
+  *out = NULL;
 
   char *buf = mp_strdup(mp, s);
   if (!buf) {
-    return NULL;
+    return 0;
   }
 
   /* Strip trailing comment if present */
@@ -275,13 +268,13 @@ const struct kv_params *rbldnsd_parse_kv_params(struct mempool *mp,
   }
 
   if (npairs == 0) {
-    return NULL;
+    return 1;
   }
 
   struct kv_params *params =
       mp_alloc(mp, sizeof(*params) + sizeof(params->kv[0]) * npairs, 1);
   if (!params) {
-    return NULL;
+    return 0;
   }
   params->n = 0;
   params->storage = buf;
@@ -341,8 +334,70 @@ const struct kv_params *rbldnsd_parse_kv_params(struct mempool *mp,
     params->n++;
   }
 
-  if (params->n == 0) {
+  if (params->n > 0) {
+    *out = params;
+  }
+  return 1;
+}
+
+int rbldnsd_entry_params(struct mempool *mp, struct dsctx *dsc,
+                         struct entry_cache *ec, const char *s,
+                         const struct kv_params **out) {
+  *out = NULL;
+  if (!s) {
+    return 1;
+  }
+  while (ISSPACE(*s)) {
+    s++;
+  }
+  if (!*s || ISCOMMENT(*s)) {
+    return 1;
+  }
+
+  size_t len = strlen(s);
+  if (len < ENTRY_CACHE_PARAMS_MAX) {
+    for (unsigned i = 0; i < ENTRY_CACHE_SLOTS; i++) {
+      if (ec->p[i].len == len && memcmp(ec->p[i].text, s, len) == 0) {
+        *out = ec->p[i].params;
+        return 1;
+      }
+    }
+  }
+
+  if (!parse_kv_params(mp, dsc, s, out)) {
+    return 0;
+  }
+
+  /* Invalid params are not cached so each such line still gets a warning */
+  if (*out && len < ENTRY_CACHE_PARAMS_MAX) {
+    unsigned i = ec->pnext++ % ENTRY_CACHE_SLOTS;
+    ec->p[i].len = (unsigned)len;
+    ec->p[i].params = *out;
+    memcpy(ec->p[i].text, s, len);
+  }
+  return 1;
+}
+
+const struct entry_meta *rbldnsd_entry_meta(struct mempool *mp,
+                                            struct entry_cache *ec,
+                                            const char *rr,
+                                            const struct kv_params *params) {
+  for (unsigned i = 0; i < ENTRY_CACHE_SLOTS; i++) {
+    if (ec->m[i].meta && ec->m[i].rr == rr && ec->m[i].params == params) {
+      return ec->m[i].meta;
+    }
+  }
+
+  struct entry_meta *meta = mp_talloc(mp, struct entry_meta);
+  if (!meta) {
     return NULL;
   }
-  return params;
+  meta->rr = rr;
+  meta->params = params;
+
+  unsigned i = ec->mnext++ % ENTRY_CACHE_SLOTS;
+  ec->m[i].meta = meta;
+  ec->m[i].rr = rr;
+  ec->m[i].params = params;
+  return meta;
 }

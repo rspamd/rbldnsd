@@ -11,10 +11,7 @@
 struct dsdata {
   struct btrie *btrie;
   const char *def_rr;	/* default RR */
-  const struct entry_meta *last_meta; /* last (rr, params) pair, shared by
-                                       * consecutive entries with the same
-                                       * values (the common case: one default
-                                       * value for the whole dataset) */
+  struct entry_cache ec;	/* shares params and entry_meta between entries */
 };
 
 definedstype(ip6trie, DSTF_IP6REV, "set of (ip6cidr, value) pairs");
@@ -80,24 +77,19 @@ ds_ip6trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
     rr = NULL;
   else {
     rbldnsd_split_entry_params(s, &params_s);
-    params = rbldnsd_parse_kv_params(ds->ds_mp, dsc, params_s);
     if (!*s || ISCOMMENT(*s))
       rr = dsd->def_rr;
     else if (!(rrl = parse_a_txt(s, &rr, dsd->def_rr, dsc)))
       return 1;
     else if (!(rr = mp_dmemdup(ds->ds_mp, rr, rrl)))
       return 0;
+    if (!rbldnsd_entry_params(ds->ds_mp, dsc, &dsd->ec, params_s, &params))
+      return 0;
   }
 
-  const struct entry_meta *meta = dsd->last_meta;
-  if (!meta || meta->rr != rr || meta->params != params) {
-    struct entry_meta *m = mp_alloc(ds->ds_mp, sizeof(*m), 1);
-    if (!m) {
-      return 0;
-    }
-    m->rr = rr;
-    m->params = params;
-    dsd->last_meta = meta = m;
+  const struct entry_meta *meta = rbldnsd_entry_meta(ds->ds_mp, &dsd->ec, rr, params);
+  if (!meta) {
+    return 0;
   }
 
   switch(btrie_add_prefix(dsd->btrie, addr, bits, meta)) {
