@@ -181,6 +181,7 @@ const struct dstype *ds_types[] = {
   dstype(ip4set),
   dstype(ip4tset),
   dstype(ip4trie),
+  dstype(ip4range),
   dstype(ip6tset),
   dstype(ip6trie),
   dstype(dnset),

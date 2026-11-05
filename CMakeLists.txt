@@ -103,6 +103,7 @@ add_executable(rbldnsd
         rbldnsd_generic.c
         rbldnsd_ip4set.c
         rbldnsd_ip4trie.c
+        rbldnsd_ip4range.c
         rbldnsd_ip4tset.c
         rbldnsd_ip6trie.c
         rbldnsd_ip6tset.c

@@ -486,6 +486,8 @@ Supported dataset types:
 .IP \(bu
 \fBip4trie\fR
 .IP \(bu
+\fBip4range\fR
+.IP \(bu
 \fBip6trie\fR
 .IP \(bu
 \fBdnhash\fR
@@ -593,6 +595,27 @@ This dataset is not particularly memory-efficient for storing many
 single IP addresses \(em it uses about 50% more memory than the ip4set
 dataset in that case.  The ip4trie dataset is better adapted, however,
 for listing CIDR ranges (whose lengths are not a multiple of 8 bits.)
+
+.SS "ip4range Dataset"
+.PP
+Set of IP4 CIDR ranges (and Ba.b.c.d\-e.f.g.hR ranges) with corresponding
+(A, TXT) values, with the same semantics as ip4trie: when entries nest, the
+most specific one wins, exclusions are supported, and per-entry values and
+parameters are allowed.  The difference is the representation: the entries
+are flattened at load time into a sorted array of disjoint ranges, adjacent
+ranges with the same value are merged, and a lookup is one binary search.
+.PP
+This dataset is intended for very large feeds.  It uses 8 bytes per stored
+range (plus 4 when the entries do not all share one value) where ip4trie
+uses about 15 bytes per entry, so a feed of tens of millions of CIDRs that
+mostly carry the default value takes a fraction of the memory and loads in a
+single pass instead of one trie insertion per entry.  A file that is sorted
+by address loads fastest; an unsorted file is sorted first.  The input lines
+are kept in a temporary array (12 bytes per line) until the end of the load.
+For ranges that are not CIDRs, the entry that starts latest wins where two
+overlap.  When the same range is listed more than once, the last line wins.
+With the environment variable \fBRBLDNSD_IP4RANGE_DEBUG\fR set, every stored
+range is printed to stderr after loading.
 
 .SS "ip4tset Dataset"
 .PP
