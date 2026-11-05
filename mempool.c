@@ -40,11 +40,7 @@ struct mempool_chunk {
 };
 
 void mp_init(struct mempool *mp) {
-  mp->mp_chunk = NULL;
-  mp->mp_nallocs = 0;
-  mp->mp_datasz = 0;
-  mp->mp_lastbuf = NULL;
-  mp->mp_lastlen = 0;
+  memset(mp, 0, sizeof(*mp));
 }
 
 /*
@@ -151,19 +147,37 @@ char *mp_strdup(struct mempool *mp, const char *str) {
   return (char*)mp_memdup(mp, str, strlen(str) + 1);
 }
 
+static unsigned mp_hash(const void *buf, unsigned len) {
+  const unsigned char *p = buf;
+  unsigned h = 2166136261u;     /* FNV-1a */
+  while (len--)
+    h = (h ^ *p++) * 16777619u;
+  return h;
+}
+
 /*
- * Deduplicating memdup/strdup: returns existing buffer if
- * content matches the last allocation (simple optimization
- * for repeated strings during parsing).
+ * Deduplicating memdup/strdup: returns an existing buffer if its content
+ * matches one of the last MP_DEDUP_SLOTS distinct buffers duplicated here,
+ * so values that alternate (A, B, A, B) share storage too.
  */
 const void *mp_dmemdup(struct mempool *mp, const void *buf, unsigned len) {
-  if (mp->mp_lastlen == len && memcmp(mp->mp_lastbuf, buf, len) == 0)
-    return mp->mp_lastbuf;
+  unsigned hash = mp_hash(buf, len);
+  struct mp_dedup_slot *slot;
+  unsigned i;
+
+  for (i = 0; i < MP_DEDUP_SLOTS; i++) {
+    slot = &mp->mp_dedup[i];
+    if (slot->buf && slot->hash == hash && slot->len == len &&
+        memcmp(slot->buf, buf, len) == 0)
+      return slot->buf;
+  }
 
   buf = mp_memdup(mp, buf, len);
   if (buf) {
-    mp->mp_lastbuf = buf;
-    mp->mp_lastlen = len;
+    slot = &mp->mp_dedup[mp->mp_dedup_next++ % MP_DEDUP_SLOTS];
+    slot->buf = buf;
+    slot->len = len;
+    slot->hash = hash;
   }
   return buf;
 }

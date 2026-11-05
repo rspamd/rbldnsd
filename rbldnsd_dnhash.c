@@ -40,11 +40,6 @@ struct key {
   const unsigned char *ldn;
 };
 
-struct entry {
-  const char *rr;		/* A and TXT RRs */
-  const struct kv_params *params;
-};
-
 static inline int64_t
 key_hash_func(struct key k)
 {
@@ -57,7 +52,9 @@ key_eq_func(struct key k1, struct key k2)
   return k1.len == k2.len && memcmp(k1.ldn, k2.ldn, k1.len) == 0;
 }
 
-KHASH_INIT(dnhash, struct key, struct entry, 1, key_hash_func, key_eq_func);
+/* The value is an entry_meta shared by all entries with the same (rr,
+ * params), so a hash slot holds one pointer however many params exist. */
+KHASH_INIT(dnhash, struct key, const struct entry_meta *, 1, key_hash_func, key_eq_func);
 
 
 /* There are two similar arrays -
@@ -192,8 +189,9 @@ dnhash_bloom_build(struct dataset *ds, khash_t(dnhash) *h, size_t nbits)
   }
 
   struct key k;
-  struct entry e;
+  const struct entry_meta *e;
   kh_foreach(h, k, e, {
+    (void)e;
     dnhash_bloom_add(b, k.ldn, k.len);
   });
 
@@ -207,6 +205,7 @@ struct dsdata {
   struct dnhash_bloom *wild_bloom[MAX_WILDCARD];
   const char *def_rr;		/* default A and TXT RRs */
   int w_maxlab;
+  struct entry_cache ec;	/* shares params and entry_meta between entries */
 };
 
 definedstype_update(dnhash, 0, "set of (domain name, value) pairs, hashed version");
@@ -221,6 +220,7 @@ static void ds_dnhash_reset(struct dsdata *dsd, int UNUSED unused_freeall) {
     dsd->wild_bloom[i] = NULL;
   }
   dsd->w_maxlab = 0;
+  memset(&dsd->ec, 0, sizeof(dsd->ec));	/* its pool is being freed */
 }
 
 static void ds_dnhash_start(struct dataset *ds) {
@@ -243,10 +243,8 @@ static int
 ds_dnhash_addent(khash_t(dnhash) *h,
                 struct dnhash_bloom *bloom,
                 const unsigned char *ldn,
-                const char *rr,
-                const struct kv_params *params,
+                const struct entry_meta *meta,
                 unsigned dnlen) {
-  struct entry *e;
   khiter_t k;
   struct key key;
   int ret;
@@ -259,9 +257,7 @@ ds_dnhash_addent(khash_t(dnhash) *h,
     return 0;
   }
 
-  e = &kh_value(h, k);
-  e->rr = rr;
-  e->params = params;
+  kh_value(h, k) = meta;
 
   if (bloom && ret > 0) {
     dnhash_bloom_add(bloom, ldn, dnlen);
@@ -324,7 +320,6 @@ ds_dnhash_line(struct dataset *ds, char *s, struct dsctx *dsc) {
 
     char *params_s = NULL;
     rbldnsd_split_entry_params(s, &params_s);
-    params = rbldnsd_parse_kv_params(ds->ds_mp, dsc, params_s);
 
     if (!*s || ISCOMMENT(*s)) {
       /* use default if none given */
@@ -334,6 +329,14 @@ ds_dnhash_line(struct dataset *ds, char *s, struct dsctx *dsc) {
     } else if (!(rr = mp_dmemdup(ds->ds_mp, rr, size))) {
       return 0;
     }
+    if (!rbldnsd_entry_params(ds->ds_mp, dsc, &dsd->ec, params_s, &params)) {
+      return 0;
+    }
+  }
+
+  const struct entry_meta *meta = rbldnsd_entry_meta(ds->ds_mp, &dsd->ec, rr, params);
+  if (!meta) {
+    return 0;
   }
 
   ldn = (unsigned char*)mp_alloc(ds->ds_mp, dnlen, 0);
@@ -354,13 +357,13 @@ ds_dnhash_line(struct dataset *ds, char *s, struct dsctx *dsc) {
     }
 
     if (!ds_dnhash_addent(dsd->wild[dnlab - 1], dsd->wild_bloom[dnlab - 1],
-                          ldn, rr, params, dnlen - 1)) {
+                          ldn, meta, dnlen - 1)) {
       return 0;
     }
   }
 
   if (isplain) {
-    if (!ds_dnhash_addent(dsd->direct, dsd->direct_bloom, ldn, rr, params, dnlen - 1)) {
+    if (!ds_dnhash_addent(dsd->direct, dsd->direct_bloom, ldn, meta, dnlen - 1)) {
       return 0;
     }
   }
@@ -458,7 +461,7 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
   const unsigned char *dn = qi->qi_dn;
   unsigned qlab = qi->qi_dnlab;
   unsigned qlen0 = qi->qi_dnlen0;
-  const struct entry *e;
+  const struct entry_meta *e;
   char name[DNS_MAXDOMAIN+1];
   khiter_t k;
   struct key srch, *pkey;
@@ -478,7 +481,7 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
     k = kh_get(dnhash, dsd->direct, srch);
 
     if (k != kh_end(dsd->direct)) {
-      e = &kh_value(dsd->direct, k);
+      e = kh_value(dsd->direct, k);
 
       /* Exclusion must override any wildcard matches (same semantics as dnset). */
       if (!e->rr) {
@@ -533,7 +536,7 @@ ds_dnhash_query(const struct dataset *ds, const struct dnsqinfo *qi,
       k = kh_get(dnhash, dsd->wild[qlab - 1], srch);
 
       if (k != kh_end(dsd->wild[qlab - 1])) {
-        e = &kh_value(dsd->wild[qlab - 1], k);
+        e = kh_value(dsd->wild[qlab - 1], k);
 
         if (qi->qi_tflag & NSQUERY_TXT) {
           pkey = &kh_key(dsd->wild[qlab - 1], k);
@@ -577,13 +580,13 @@ ds_dnhash_dump(const struct dataset *ds,
               const unsigned char UNUSED *unused_odn,
               FILE *f) {
   const struct dsdata *dsd = ds->ds_dsd;
-  struct entry e;
+  const struct entry_meta *e;
   struct key k;
   char name[DNS_MAXDOMAIN+4];
 
   kh_foreach(dsd->direct, k, e, {
     dns_dntop(k.ldn, name, sizeof(name));
-    dump_a_txt(name, e.rr, name, ds, f);
+    dump_a_txt(name, e->rr, name, ds, f);
   });
 
   for (unsigned int i = 0; i < MAX_WILDCARD; i++) {
@@ -591,7 +594,7 @@ ds_dnhash_dump(const struct dataset *ds,
 
     kh_foreach(dsd->wild[i], k, e, {
       dns_dntop(k.ldn, name + 2, sizeof(name) - 2);
-      dump_a_txt(name, e.rr, name, ds, f);
+      dump_a_txt(name, e->rr, name, ds, f);
     });
   }
 }
@@ -610,8 +613,8 @@ int rbldnsd_dnhash_foreach(const struct dataset *ds, snapshot_visit_fn *visit, v
         e.name = kh_key(h, k).ldn;
         e.namelen = kh_key(h, k).len;
         e.table = t;
-        e.rr = kh_val(h, k).rr;
-        const struct kv_params *p = kh_val(h, k).params;
+        e.rr = kh_val(h, k)->rr;
+        const struct kv_params *p = kh_val(h, k)->params;
         e.nparams = p ? p->n : 0;
         if (e.nparams > SNAPSHOT_MAX_PARAMS) {
           return 0;
