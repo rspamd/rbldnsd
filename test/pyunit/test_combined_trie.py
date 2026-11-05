@@ -64,6 +64,9 @@ class CombinedTrie(unittest.TestCase):
         self.tmp.cleanup()
 
     def start(self, name_length):
+        # A failed subTest skips the stop() at the end of its iteration; make
+        # sure the previous daemon is gone before reusing its port.
+        self.stop()
         zone = pathlib.Path(self.tmp.name) / f'zone{name_length}'
         zone.write_text(ZONE.format(v4name='4' * name_length, v6name='6' * name_length))
         self.log.seek(0)
