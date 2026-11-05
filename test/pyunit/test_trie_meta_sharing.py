@@ -25,8 +25,7 @@ Two checks:
   in use; skipped on other allocators): the per-entry memory outside the
   trie itself, i.e. the heap growth between a 50k-entry and a 150k-entry
   default-valued ip4trie minus the growth of the trie reported by
-  btrie_stats, must be under 8 bytes (allocator rounding of the pool chunks
-  accounts for up to 5 on jemalloc), for default-valued entries, for entries
+  btrie_stats, must be under 4 bytes, for default-valued entries, for entries
   alternating between a few values and exclusions, and for entries that all
   carry the same @params. Sharing only with the previous entry costs 16 to
   about 60 bytes per entry in these zones.
@@ -184,10 +183,10 @@ DN_EXPECTED = [
 ]
 
 SMALL, LARGE = 50000, 150000
-# A per-entry struct is 16 bytes. Allow for allocator rounding of the pool's
-# 64 KB-plus-header chunks: jemalloc puts them in its 80 KB size class, which
-# shows up as about 5 bytes per entry of apparent overhead; glibc shows under 1.
-MAX_OVERHEAD_BYTES_PER_ENTRY = 8
+# A per-entry struct is 16 bytes. Shared values measure under 1 byte per
+# entry with glibc and jemalloc (pool chunks fit an allocator size class);
+# the margin absorbs page-granular heap statistics.
+MAX_OVERHEAD_BYTES_PER_ENTRY = 4
 
 
 def reverse_ip4(addr):
