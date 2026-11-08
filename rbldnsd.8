@@ -589,6 +589,12 @@ and allows for the specification of A/TXT values on a per CIDR range
 basis.  (If multiple CIDR ranges match a query, the value for longest
 matching prefix is returned.)  Exclusions are supported too.
 .PP
+If the same prefix is listed more than once, the first entry is used and
+the later ones are ignored with a warning, except that an exclusion
+(\fB!\fRprefix) always wins over a listing of the same prefix, whatever
+the order of the lines.  A longer or shorter prefix is a different entry:
+excluding a /32 inside a listed /24 affects only that one address.
+.PP
 This dataset is not particularly memory-efficient for storing many
 single IP addresses \(em it uses about 50% more memory than the ip4set
 dataset in that case.  The ip4trie dataset is better adapted, however,
@@ -609,7 +615,8 @@ addresses compared to \fBip4set\fR.
 Set of IP6 CIDR ranges.
 This is the IP6 equivalent of the ip4trie dataset.
 It allows the sepecification of individual A/TXT values for each CIDR range
-and supports exclusions.  Compressed ("::") ip6 notation is supported.
+and supports exclusions, with the same rules for duplicated prefixes as
+ip4trie.  Compressed ("::") ip6 notation is supported.
 .PP
 Example zone data:
 .nf

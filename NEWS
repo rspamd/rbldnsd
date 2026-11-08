@@ -1,6 +1,16 @@
 This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
+Unreleased
+ - ip4trie/ip6trie: duplicated prefixes are resolved consistently. The
+   first entry is kept, and an exclusion always wins over a listing of the
+   same prefix whatever the order. 1.1.0 started storing IPv4 entries as
+   128-bit keys, which changed the trie shape so that for most duplicated
+   /32s the later line silently replaced the earlier one: a dataset that
+   delists an address near the top and still lists it further down served
+   it as listed, where 1.0.x served NXDOMAIN. btrie_add_prefix() no longer
+   overwrites; the new btrie_replace_prefix() does so explicitly.
+
 1.1.0 (07 Sep 2026)
  - Add an owner-only Unix datagram control socket (-M) for JSON status,
    aggregate and per-worker metrics, reload, and shutdown.

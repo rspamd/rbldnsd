@@ -134,11 +134,20 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
   case BTRIE_OKAY:
     return 1;
   case BTRIE_DUPLICATE_PREFIX:
+    /* The first entry for a prefix is kept, except that an exclusion always
+     * wins: a later "!prefix" replaces an earlier listing of the same prefix,
+     * and an earlier exclusion is never displaced by a later listing. */
+    if (not) {
+      btrie_replace_prefix(dsd->btrie, ipv6_addr, ipv6 ? bits : 96 + bits, meta);
+    }
     if (!ipv6) {
-      dswarn(dsc, "duplicated entry for ipv4 %s/%d", ip4atos(a), bits);
+      dswarn(dsc, "duplicated entry for ipv4 %s/%d (%s)", ip4atos(a), bits,
+             not ? "excluded" : "first entry kept");
     }
     else {
-      dswarn(dsc, "duplicated entry for ipv6 %s/%d", ip6atos(ipv6_addr, IP6ADDR_FULL), bits);
+      dswarn(dsc, "duplicated entry for ipv6 %s/%d (%s)",
+             ip6atos(ipv6_addr, IP6ADDR_FULL), bits,
+             not ? "excluded" : "first entry kept");
     }
     return 1;
   case BTRIE_ALLOC_FAILED:
