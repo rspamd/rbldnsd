@@ -371,7 +371,7 @@ static int newsocket_unix(const char *path)
   sds *elts = sdssplitlen(path, strlen(path), ":", 1, &nelts);
   struct sockaddr_un un;
   unsigned mode = 00644;
-  size_t pwlen;
+  long pwlen;			/* sysconf() returns -1 when there is no limit (musl) */
   char *pwbuf, *p;
   struct passwd pw, *ppw;
   struct group gr, *pgr;
