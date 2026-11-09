@@ -475,8 +475,11 @@ static int newsocket_unix(const char *path)
   return fd;
 }
 
+/* Open and bind one socket per address in bindaddr[0..nba), appending the
+ * descriptors to dest[*count] and advancing *count.  Returns *count. */
 static int
-initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family) {
+initsockets(const char *bindaddr[MAXSOCK], int *dest, int *count, int nba,
+            int UNUSED family) {
 
   int i, x = 0;
   char *host, *serv;
@@ -496,7 +499,7 @@ initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family
       int nfd = newsocket_unix(ba);
 
       if (nfd != -1) {
-        dest[numsock++] = nfd;
+        dest[(*count)++] = nfd;
       }
     }
     else {
@@ -519,7 +522,7 @@ initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family
         int nfd = newsocket(ai);
         if (nfd != -1) {
           ++x;
-          dest[numsock++] = nfd;
+          dest[(*count)++] = nfd;
         }
       }
       if (!x)
@@ -531,7 +534,7 @@ initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family
   endservent();
   endhostent();
 
-  for (i = 0; i < numsock; ++i) {
+  for (i = 0; i < *count; ++i) {
     x = 65536;
     do {
       if (setsockopt(dest[i], SOL_SOCKET, SO_RCVBUF, (void *) &x, sizeof x) == 0) {
@@ -540,7 +543,7 @@ initsockets(const char *bindaddr[MAXSOCK], int *dest, int nba, int UNUSED family
     } while ((x -= (x >> 5)) >= 1024);
   }
 
-  return numsock;
+  return *count;
 }
 
 static struct {
@@ -935,7 +938,7 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
       }
     }
   }
-  initsockets(bindaddr, sock, nba, family);
+  initsockets(bindaddr, sock, &numsock, nba, family);
   if (nworkers > 1) {
     /* Bind all slots before chroot/setuid, including privileged ports.
      * The supervisor retains these descriptors across generations. */
@@ -1883,6 +1886,9 @@ ev_update_handler(struct ev_loop *loop, ev_io *w, int revents)
 
     for(struct dslist *dsl = found->z_dsl; dsl; dsl = dsl->dsl_next) {
       if (dsl->dsl_ds->ds_type->dst_updatefn) {
+        /* the update functions log through dsc like the zone loader does */
+        memset(&dsc, 0, sizeof(dsc));
+        dsc.dsc_ds = dsl->dsl_ds;
         dsl->dsl_ds->ds_type->dst_updatefn(dsl->dsl_ds, (char *)(zero_pos + 1), &dsc);
         dslog(LOG_INFO, 0, "send update event for zone %s: %s",
             found->z_name, zero_pos + 1);
