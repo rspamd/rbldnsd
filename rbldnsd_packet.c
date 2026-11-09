@@ -26,6 +26,7 @@
 #endif
 
 #define MAX_GLUE (MAX_NS*2)
+#define EDNS_R_BADVERS 16	/* extended rcode: unsupported EDNS version */
 
 static int addrr_soa(struct dnspacket *pkt, const struct zone *zone, int auth);
 static int addrr_ns(struct dnspacket *pkt, const struct zone *zone, int auth);
@@ -78,7 +79,8 @@ parsequery(struct dnspacket *pkt, unsigned qlen,
    * first p_hdrsize bytes is header, next is query DN,
    * next are QTYPE and QCLASS (2x2 bytes).
    * If NSCNT==0 && ARCNT==1, and an OPT record comes after the query,
-   * EDNS0 packet size gets extracted from the OPT record.
+   * EDNS0 packet size and version get extracted from the OPT record,
+   * and pkt->p_edns is set so that the reply carries an OPT record too.
    * Rest of data is ignored.
    * Returns true on success, 0 on failure.
    * Upon successeful return, pkt->p_sans = pkt->p_cur points to the end of
@@ -86,17 +88,16 @@ parsequery(struct dnspacket *pkt, unsigned qlen,
    * pkt->p_endp is initialized to point to the real end of answers.
    * Real end of answers is:
    * for non-EDNS0-aware clients it's pkt->p_buf+DNS_MAXPACKET, and
-   * if a vaild EDNS0 UDPsize is given, it will be pkt->p_buf+UDPsize-11,
-   * with the 11 bytes needed for a minimal OPT record.
-   * In replypacket() we check whenever all our answers fits in standard
-   * UDP buffer size (DNS_MAXPACKET), and if not (which means we're replying
-   * to EDNS0-aware client due to the above rules), we just add proper OPT
-   * record at the end.
+   * for EDNS0 clients it's pkt->p_buf+UDPsize-DNS_EDNS0_OPTSIZE, where
+   * UDPsize is the size the client gave, limited to
+   * DNS_MAXPACKET..edns_maxpacket, and the reserved bytes are for the
+   * minimal OPT record replypacket() appends to every reply to such client.
    */
 
   register unsigned const char *q = pkt->p_buf;
   register unsigned const char *x, *e;
   register unsigned char *d;
+  unsigned const char *const pend = q + qlen; /* end of received data */
   unsigned qlab;			/* number of labels in qDN */
 
   x = q + qlen - 5;	/* last possible qDN zero terminator position */
@@ -143,23 +144,25 @@ parsequery(struct dnspacket *pkt, unsigned qlen,
   pkt->p_sans = (unsigned char *)q; /* answers will start here */
   pkt->p_cur = (unsigned char *)q;  /* and current answer pointer is here */
   d = pkt->p_buf;
-  if (q < x &&
+  if (pend - q >= DNS_EDNS0_OPTSIZE &&	/* whole OPT RR is here */
       d[p_nscnt1] == 0 && d[p_nscnt2] == 0 &&
       d[p_arcnt1] == 0 && d[p_arcnt2] == 1 &&
       q[0] == 0 /* empty DN */ &&
       q[1] == (DNS_T_OPT>>8) && q[2] == (DNS_T_OPT&255)) {
     qlen = (((unsigned)q[3]) << 8) | q[4];
-    /* 11 bytes are needed to encode minimal EDNS0 OPT record */
-    if (qlen < DNS_MAXPACKET + 11)
+    if (qlen < DNS_MAXPACKET)
       qlen = DNS_MAXPACKET;
-    else if (qlen > sizeof(pkt->p_buf) - 11)
-      qlen = sizeof(pkt->p_buf) - 11;
-    else
-      qlen -= 11;
-    pkt->p_endp = d + qlen;
+    else if (qlen > edns_maxpacket)
+      qlen = edns_maxpacket;
+    /* reserve room for our OPT record */
+    pkt->p_endp = d + qlen - DNS_EDNS0_OPTSIZE;
+    pkt->p_edns = 1;
+    pkt->p_ednsver = q[6];	/* q[5] is extended rcode */
   }
-  else
+  else {
     pkt->p_endp = d + DNS_MAXPACKET;
+    pkt->p_edns = 0;
+  }
 
   return 1;
 }
@@ -291,6 +294,24 @@ findqzone(const struct zone *zone,
 # define do_stats(x) x
 #endif
 
+/* finish a reply: add OPT record if the query had one.
+ * parsequery() reserved DNS_EDNS0_OPTSIZE bytes past p_endp for it.
+ * ercode is upper 8 bits of extended rcode.  Returns reply length. */
+static int finishreply(struct dnspacket *pkt, unsigned ercode) {
+  if (pkt->p_edns) {
+    register unsigned char *c = pkt->p_cur;
+    *c++ = 0;			/* empty (root) DN */
+    PACK16S(c, DNS_T_OPT);
+    PACK16S(c, edns_maxpacket);	/* our UDP payload size */
+    *c++ = ercode; *c++ = 0;	/* extended RCODE and version */
+    *c++ = 0; *c++ = 0;		/* flags */
+    *c++ = 0; *c++ = 0;		/* RDLEN */
+    pkt->p_cur = c;
+    pkt->p_buf[p_arcnt2] += 1;	/* arcnt is limited to 254 records */
+  }
+  return pkt->p_cur - pkt->p_buf;
+}
+
 /* construct reply to a query. */
 int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct dnsqinfo *qi) {
 
@@ -345,10 +366,19 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
     refuse(DNS_R_NOTIMPL);
   }
   h[p_f1] |= pf1_qr;
+  if (pkt->p_edns && pkt->p_ednsver != 0) {
+    /* BADVERS (16): lower 4 bits go to the header, the rest to OPT */
+    setnonauth(h);
+    h[p_f2] = EDNS_R_BADVERS & pf2_rcode;
+    finishreply(pkt, EDNS_R_BADVERS >> 4);
+    do_stats(gstats.q_err += 1; gstats.b_in += qlen; gstats.b_out += rlen());
+    return rlen();
+  }
   if (qry.q_class == DNS_C_IN)
     h[p_f1] |= pf1_aa;
   else if (qry.q_class != DNS_C_ANY) {
     if (version_req(pkt, &qry)) {
+      finishreply(pkt, 0);
       do_stats(gstats.q_ok += 1; gstats.b_in += qlen; gstats.b_out += rlen());
       return rlen();
     }
@@ -486,28 +516,17 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
     do_stats(zone->z_stats.q_ok += 1);
   }
   (void)call_hook(query_result, (pkt->p_peer, zone, qi, found));
-  if (rlen() > DNS_MAXPACKET) {	/* add OPT record for long replies */
-    /* as per parsequery(), we always have 11 bytes for minimal OPT record at
-     * the end of our reply packet, OR rlen() does not exceed DNS_MAXPACKET */
-    h[p_arcnt2] += 1;		/* arcnt is limited to 254 records */
-    h = pkt->p_cur;
-    *h++ = 0;			/* empty (root) DN */
-    PACK16S(h, DNS_T_OPT);
-    PACK16S(h, DNS_EDNS0_MAXPACKET);
-    *h++ = 0; *h++ = 0;		/* RCODE and version */
-    *h++ = 0; *h++ = 0;		/* rest of the TTL field */
-    *h++ = 0; *h++ = 0;		/* RDLEN */
-    pkt->p_cur = h;
-    h = pkt->p_buf;		/* restore for rlen() to work */
-  }
+  finishreply(pkt, 0);
   do_stats(zone->z_stats.b_out += rlen());
   return rlen();
 
 err_nz:
+  finishreply(pkt, 0);
   do_stats(gstats.q_err += 1; gstats.b_in += qlen; gstats.b_out += rlen());
   return rlen();
 
 err_z:
+  finishreply(pkt, 0);
   do_stats(zone->z_stats.q_err += 1; zone->z_stats.b_out += rlen());
   return rlen();
 }

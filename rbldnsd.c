@@ -133,7 +133,8 @@ static FILE *flog;		/* log file */
 static int flushlog;		/* flush log after each line */
 static struct zone *zonelist;	/* list of zones we're authoritative for */
 static int numzones;		/* number of zones in zonelist */
-int lazy;			/* don't return AUTH section by default */
+int lazy = 1;			/* don't return AUTH section by default */
+unsigned edns_maxpacket = DNS_EDNS0_DEFPACKET; /* EDNS0 reply size limit */
 static int fork_on_reload; /* >0 - perform fork on reloads, <0 - this is a child of reloading parent */
 static int can_reload; /* block reload when another reload is there */
 static int pending_reload = 0;
@@ -243,9 +244,10 @@ static void NORETURN usage(int exitcode) {
 #endif
 " -a - omit AUTH section from regular replies, do not return list of\n"
 "  nameservers, but only return NS info when explicitly asked.\n"
-"  This is an equivalent of bind9 \"minimal-answers\" setting.\n"
-"  In future versions this mode will be the default.\n"
+"  This is an equivalent of bind9 \"minimal-answers\" setting (default).\n"
 " -A - put AUTH section in every reply.\n"
+" -E size - max size of a reply to an EDNS0 client, 512..2048 bytes\n"
+"  (default is 1232, which avoids IP fragmentation)\n"
 " -F facility - Log facility for syslog. Default is 'daemon'.\n"
 #ifndef NO_ZLIB
 " -C - disable on-the-fly decompression of dataset files\n"
@@ -624,7 +626,7 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
     usage(1);
   }
 
-  while ((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:T:O:R:")) != EOF) {
+  while ((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:T:O:R:E:")) != EOF) {
     switch (c) {
     case 'O': {
       char *end;
@@ -638,6 +640,16 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
     case 'R':
       ratelimit_path = optarg;
       break;
+    case 'E': {
+      char *end;
+      unsigned long n = strtoul(optarg, &end, 10);
+      if (!*optarg || *end || n < DNS_MAXPACKET || n > DNS_EDNS0_MAXPACKET) {
+        error(0, "invalid EDNS0 reply size (expected %d..%d)",
+              DNS_MAXPACKET, DNS_EDNS0_MAXPACKET);
+      }
+      edns_maxpacket = n;
+      break;
+    }
     case 'M':
       control_path = optarg;
       break;

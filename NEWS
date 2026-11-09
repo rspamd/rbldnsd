@@ -1,6 +1,20 @@
 This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
+Unreleased
+ - Replies no longer carry the NS list in the AUTH section by default
+   (lazy mode, as with -a).  Use -A to get the previous behaviour.
+ - Limit replies to EDNS0 clients to 1232 bytes by default instead of 2048,
+   to avoid fragmentation and reduce amplification.  New option -E sets
+   the limit (512..2048).
+ - Always return an OPT record when the query had one, not only for replies
+   longer than 512 bytes, and answer BADVERS to EDNS versions other than 0.
+ - Recognise the OPT record after a long query name (it was ignored when
+   the name was close to the 255-byte limit).
+ - Fix an out-of-bounds stack write on a query name with too many labels,
+   and several smaller bounds problems in reply construction and query
+   logging.
+
 1.1.0 (07 Sep 2026)
  - Add an owner-only Unix datagram control socket (-M) for JSON status,
    aggregate and per-worker metrics, reload, and shutdown.
