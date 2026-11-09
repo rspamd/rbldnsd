@@ -301,6 +301,10 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
   extern int lazy; /*XXX hack*/
 
   pkt->p_substrr = 0;
+  /* per-packet state: p_sans stays NULL until parsequery() succeeds */
+  pkt->p_sans = pkt->p_cur = NULL;
+  qi->qi_tflag = 0;
+  qi->qi_additional = NULL;
   /* check global ACL */
   if (g_dsacl && g_dsacl->ds_stamp) {
     found = ds_acl_query(g_dsacl, pkt);
@@ -1029,9 +1033,11 @@ static int version_req(struct dnspacket *pkt, const struct dnsquery *qry) {
 
 void logreply(const struct dnspacket *pkt, FILE *flog,
     int flushlog, const struct dnsqinfo *qi, unsigned reply_len) {
-  char cbuf[DNS_MAXDOMAIN + IPSIZE + 51 + DNS_MAXLABEL];
+  /* besides name, addr and key: time 21, ' ' x3, type 9, class 10, rcode 8,
+   * ':' '/' x2, counts 3 + 11, '\n', NUL = 71 + slack */
+  char cbuf[DNS_MAXDOMAIN + IPSIZE + 72 + DNS_MAXLABEL];
   char *cp = cbuf;
-  const unsigned char *const q = pkt->p_sans - 4;
+  const unsigned char *q;
 
   cp += sprintf(cp, "%lu ", (unsigned long)time(NULL));
 #ifndef NO_IPv6
@@ -1046,6 +1052,11 @@ void logreply(const struct dnspacket *pkt, FILE *flog,
   cp += strlen(cp);
 #endif
   *cp++ = ' ';
+  if (!pkt->p_sans) {	/* query was not parsed: do not look at the packet */
+    cp += sprintf(cp, "? malformed: drop\n");
+    goto out;
+  }
+  q = pkt->p_sans - 4;
   cp += dns_dntop(pkt->p_buf + p_hdrsize, cp, DNS_MAXDOMAIN);
 
   if (reply_len > 0) {
@@ -1062,15 +1073,17 @@ void logreply(const struct dnspacket *pkt, FILE *flog,
   }
 
   if (qi->qi_tflag & NSQUERY_KEY && qi->qi_additional) {
-    int len = strlen(qi->qi_additional);
+    const char *key = qi->qi_additional, *e = memchr(key, 0, DNS_MAXLABEL);
+    size_t len = e ? (size_t)(e - key) : DNS_MAXLABEL;
 
     *cp++ = ' ';
-    memcpy(cp, qi->qi_additional, len);
+    memcpy(cp, key, len);
     cp += len;
   }
 
   *cp++ = '\n';
 
+out:
   if (flushlog)
     write(fileno(flog), cbuf, cp - cbuf);
   else
