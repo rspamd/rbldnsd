@@ -1,6 +1,14 @@
 This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
+Unreleased
+ - A combined zone specification may carry a dataset type override,
+   combined[from=to,...]:file: every $DATASET line in the file that names
+   type `from' is loaded as type `to'. Meant for data files shared with
+   other rbldnsd installations that must keep their declared type (e.g.
+   load a huge ip4trie feed as ip4set here). Datasets are shared between
+   zones only when the override matches too.
+
 1.1.0 (07 Sep 2026)
  - Add an owner-only Unix datagram control socket (-M) for JSON status,
    aggregate and per-worker metrics, reload, and shutdown.

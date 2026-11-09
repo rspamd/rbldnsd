@@ -282,6 +282,12 @@ declaredstype(aclkey);
 
 extern const struct dstype *ds_types[];
 
+/* the dataset type called `name', or NULL */
+const struct dstype *ds_find_type(const char *name);
+/* `t' after applying the type overrides of `ds' (NULL ds: unchanged) */
+const struct dstype *ds_alias_type(const struct dataset *ds,
+                                   const struct dstype *t);
+
 /*
  * Each zone is composed of a set of datasets.
  * There is a global list of datasets, each
@@ -310,12 +316,22 @@ struct dsns { /* dsns, nameserver */
   unsigned char dsns_dn[1];		/* nameserver DN, varlen */
 };
 
+/* Dataset type override, given in a zone specification as
+ * type[from=to,...]:files.  Every $DATASET line of a combined file that
+ * names type `from' is loaded as type `to'. */
+struct dstalias {
+  const struct dstype *from, *to;
+  struct dstalias *next;
+};
+
 struct dataset {	/* ds */
   const struct dstype *ds_type;	/* type of this data */
   struct dsdata *ds_dsd;		/* type-specific data */
   time_t ds_stamp;			/* timestamp */
   time_t ds_expires;			/* when the dataset expires if any */
   const char *ds_spec;			/* original specification */
+  const char *ds_aliasspec;		/* type override text ("" if none) */
+  const struct dstalias *ds_aliases;	/* parsed type overrides */
   struct dsfile *ds_dsf;		/* list of files for this data */
   struct dssoa *ds_dssoa;		/* SOA record */
   struct dsns *ds_dsns;			/* list of nameservers */
