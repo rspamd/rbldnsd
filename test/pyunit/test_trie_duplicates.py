@@ -44,17 +44,21 @@ def reverse_name(addr):
 
 
 class Daemon:
-    def __init__(self, tmp, name, text):
+    def __init__(self, tmp, name, text, updates=False, dstype='combined'):
         self.zone = pathlib.Path(tmp) / name
         self.zone.write_text(HEADER + text)
         self.log = open(pathlib.Path(tmp) / (name + '.log'), 'w+')
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.bind(('127.0.0.1', 0))
             self.port = s.getsockname()[1]
-        self.proc = subprocess.Popen(
-            [BINARY, '-n', '-b', f'127.0.0.1/{self.port}',
-             'example.test:combined:' + str(self.zone)],
-            stdout=self.log, stderr=self.log)
+        args = [BINARY, '-n', '-b', f'127.0.0.1/{self.port}']
+        self.update_sock = None
+        if updates:
+            # keep the path short: sun_path is 104 bytes on macOS
+            self.update_sock = os.path.join(tempfile.gettempdir(), f'rbldnsd-upd-{os.getpid()}-{self.port}')
+            args += ['-U', self.update_sock]
+        args.append(f'example.test:{dstype}:{self.zone}')
+        self.proc = subprocess.Popen(args, stdout=self.log, stderr=self.log)
         deadline = time.time() + 10
         while time.time() < deadline:
             if self.proc.poll() is not None:
@@ -69,6 +73,19 @@ class Daemon:
             self.proc.terminate()
             self.proc.wait(timeout=10)
         self.log.close()
+        if self.update_sock and os.path.exists(self.update_sock):
+            os.unlink(self.update_sock)
+
+    def update(self, line):
+        """Send one dataset line through the -U socket; returns the reply."""
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as s:
+            s.settimeout(5)
+            s.bind(self.update_sock + '.client')
+            try:
+                s.sendto(b'example.test\0' + line.encode(), self.update_sock)
+                return s.recv(64).decode()
+            finally:
+                os.unlink(self.update_sock + '.client')
 
     def read_log(self):
         self.log.seek(0)
@@ -166,8 +183,8 @@ class TrieDuplicates(unittest.TestCase):
             d.stop()
         self.tmp.cleanup()
 
-    def start(self, name, text):
-        d = Daemon(self.tmp.name, name, text)
+    def start(self, name, text, **kw):
+        d = Daemon(self.tmp.name, name, text, **kw)
         self.daemons.append(d)
         return d
 
@@ -228,6 +245,35 @@ class TrieDuplicates(unittest.TestCase):
                 addr = ipaddress.ip_network(target).network_address + 7
                 self.assertEqual(d.query(addr), '127.0.0.5')
                 d.stop()
+
+    def test_update_replaces_existing_prefix(self):
+        """Keep-first applies to zone files only: a dynamic update (-U) of a
+        prefix that is already present replaces it, in both directions."""
+        # a plain ip4trie zone: the combined dataset has no update function
+        d = self.start('ip4trie-update',
+                       '192.0.2.1 :127.0.0.2:listed\n'
+                       '!192.0.2.2\n'
+                       '192.0.2.2 :127.0.0.2:relisted in file, ignored\n'
+                       '2001:db8::1 :127.0.0.2:listed\n',
+                       updates=True, dstype='ip4trie')
+        self.assertEqual(d.query('192.0.2.1'), '127.0.0.2')
+        self.assertIsNone(d.query('192.0.2.2'))
+        self.assertEqual(d.query('2001:db8::1'), '127.0.0.2')
+
+        self.assertEqual(d.update('192.0.2.1 :127.0.0.9:changed'), 'OK')
+        self.assertEqual(d.query('192.0.2.1'), '127.0.0.9')
+        self.assertEqual(d.update('192.0.2.2 :127.0.0.9:relisted'), 'OK')
+        self.assertEqual(d.query('192.0.2.2'), '127.0.0.9')
+        self.assertEqual(d.update('!192.0.2.1'), 'OK')
+        self.assertIsNone(d.query('192.0.2.1'))
+        self.assertEqual(d.update('2001:db8::1 :127.0.0.9:changed'), 'OK')
+        self.assertEqual(d.query('2001:db8::1'), '127.0.0.9')
+        self.assertEqual(d.update('192.0.2.3 :127.0.0.9:new'), 'OK')
+        self.assertEqual(d.query('192.0.2.3'), '127.0.0.9')
+        # updates are not duplicates: no warning, and no crash on the dsctx
+        self.assertNotIn('duplicated entry for ipv4 192.0.2.1', d.read_log())
+        self.assertIsNone(d.proc.poll(), d.read_log())
+        d.stop()
 
 
 if __name__ == '__main__':

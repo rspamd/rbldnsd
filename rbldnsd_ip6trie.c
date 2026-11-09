@@ -92,14 +92,12 @@ ds_ip6trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
   meta->rr = rr;
   meta->params = params;
 
-  switch(btrie_add_prefix(dsd->btrie, addr, bits, meta)) {
+  /* first entry kept, but an exclusion always wins (see ip4trie) */
+  switch(excl ? btrie_replace_prefix(dsd->btrie, addr, bits, meta)
+              : btrie_add_prefix(dsd->btrie, addr, bits, meta)) {
   case BTRIE_OKAY:
     return 1;
   case BTRIE_DUPLICATE_PREFIX:
-    /* first entry kept, but an exclusion always wins (see ip4trie) */
-    if (excl) {
-      btrie_replace_prefix(dsd->btrie, addr, bits, meta);
-    }
     dswarn(dsc, "duplicated entry for %s/%d (%s)",
            ip6atos(addr, IP6ADDR_FULL), bits,
            excl ? "excluded" : "first entry kept");

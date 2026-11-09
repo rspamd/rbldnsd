@@ -594,6 +594,9 @@ the later ones are ignored with a warning, except that an exclusion
 (\fB!\fRprefix) always wins over a listing of the same prefix, whatever
 the order of the lines.  A longer or shorter prefix is a different entry:
 excluding a /32 inside a listed /24 affects only that one address.
+A dynamic update (\fB\-U\fR) is different: an update for a prefix that is
+already present replaces its value, so an update can relist an excluded
+address or exclude a listed one.
 .PP
 This dataset is not particularly memory-efficient for storing many
 single IP addresses \(em it uses about 50% more memory than the ip4set

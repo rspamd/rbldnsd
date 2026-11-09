@@ -967,9 +967,12 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
   }
 
   if (update_addr) {
-    if (initsockets(&update_addr, &update_sock, 1, family) != 1) {
+    /* not part of sock[]: a single descriptor, independent of numsock */
+    int upd[MAXSOCK], nupd = 0;
+    if (initsockets(&update_addr, upd, &nupd, 1, family) != 1) {
       error(0, "unable to listen for updates on `%s'", update_addr);
     }
+    update_sock = upd[0];
   }
 
 #ifndef NO_DSO

@@ -10,6 +10,12 @@ Unreleased
    delists an address near the top and still lists it further down served
    it as listed, where 1.0.x served NXDOMAIN. btrie_add_prefix() no longer
    overwrites; the new btrie_replace_prefix() does so explicitly.
+   Dynamic updates (-U) of an ip4trie prefix that is already present still
+   replace its value, including relisting an excluded address.
+ - acl: a duplicated prefix now always keeps the first entry (previously
+   the later one won for some trie shapes); the warning says so.
+ - Fix -U: the update socket was indexed with the count of listening
+   sockets, so rbldnsd always exited with "unable to listen for updates".
 
 1.1.0 (07 Sep 2026)
  - Add an owner-only Unix datagram control socket (-M) for JSON status,

@@ -27,8 +27,11 @@ static void ds_ip4trie_start(struct dataset *ds) {
     dsd->btrie = btrie_init(ds->ds_mp);
 }
 
+/* Parse one entry and insert it.  Duplicated prefixes keep the first entry
+ * (an exclusion always wins), unless update is set: a dynamic update of an
+ * existing prefix replaces whatever is there. */
 static int
-ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
+ds_ip4trie_add(struct dataset *ds, char *s, struct dsctx *dsc, int update)
 {
   struct dsdata *dsd = ds->ds_dsd;
   ip4addr_t a;
@@ -117,31 +120,30 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
   meta->rr = rr;
   meta->params = params;
 
-  int ret = -1;
-
-  if (ipv6) {
-    ret = btrie_add_prefix(dsd->btrie, ipv6_addr, bits, meta);
-  }
-  else {
+  if (!ipv6) {
     memset(ipv6_addr, 0, 10);
     ipv6_addr[10] = 0xffu;
     ipv6_addr[11] = 0xffu;
     ip4unpack(ipv6_addr + 12, a);
-    ret = btrie_add_prefix(dsd->btrie, ipv6_addr, 96 + bits, meta);
+    bits += 96;
   }
+
+  /* The first entry for a prefix is kept, except that an exclusion always
+   * wins: a later "!prefix" replaces an earlier listing of the same prefix,
+   * and an earlier exclusion is never displaced by a later listing.
+   * A dynamic update always replaces. */
+  int ret = (not || update)
+    ? btrie_replace_prefix(dsd->btrie, ipv6_addr, bits, meta)
+    : btrie_add_prefix(dsd->btrie, ipv6_addr, bits, meta);
 
   switch(ret) {
   case BTRIE_OKAY:
     return 1;
   case BTRIE_DUPLICATE_PREFIX:
-    /* The first entry for a prefix is kept, except that an exclusion always
-     * wins: a later "!prefix" replaces an earlier listing of the same prefix,
-     * and an earlier exclusion is never displaced by a later listing. */
-    if (not) {
-      btrie_replace_prefix(dsd->btrie, ipv6_addr, ipv6 ? bits : 96 + bits, meta);
-    }
+    if (update)
+      return 1;                 /* replaced, that is what an update is for */
     if (!ipv6) {
-      dswarn(dsc, "duplicated entry for ipv4 %s/%d (%s)", ip4atos(a), bits,
+      dswarn(dsc, "duplicated entry for ipv4 %s/%d (%s)", ip4atos(a), bits - 96,
              not ? "excluded" : "first entry kept");
     }
     else {
@@ -157,10 +159,16 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
 }
 
 static int
+ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
+{
+  return ds_ip4trie_add(ds, s, dsc, 0);
+}
+
+static int
 ds_ip4trie_update(struct dataset *ds, char *s, struct dsctx *dsc)
 {
-  /* Exactly the same for updates */
-  return ds_ip4trie_line(ds, s, dsc);
+  /* Same syntax as a zone line, but an existing prefix is replaced */
+  return ds_ip4trie_add(ds, s, dsc, 1);
 }
 
 
