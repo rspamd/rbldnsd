@@ -123,7 +123,10 @@ ds_ip4set_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   }
   else
     not = 0;
-  if ((bits = ip4range(s, &a, &b, &s)) <= 0 ||
+  /* bits is 0 for a /0 entry: one range covering everything, accepted like
+   * ip4trie does (the octet-level engine rejected it, as it would have
+   * expanded to every address) */
+  if ((bits = ip4range(s, &a, &b, &s)) < 0 ||
       (*s && !ISSPACE(*s) && !ISCOMMENT(*s) && *s != ':')) {
     dswarn(dsc, "invalid address");
     return 1;

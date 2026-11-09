@@ -398,6 +398,23 @@ class Ip4SetBehaviourChanges(DaemonCase):
         self.check(d, '10.0.2.25', ['127.0.0.4'])
         self.check(d, '10.0.2.31', [])
 
+    def test_zero_prefix_entry_is_the_fallback(self):
+        """A /0 line (a country feed uses "0.0.0.0/0 EU" as its fallback) is
+        one range covering the whole address space, as in ip4trie. The octet
+        engine rejected it, so the parser check must not keep its "<= 0"."""
+        text = '0.0.0.0/0 :127.0.0.9:everything\n!10.0.0.0/8\n192.0.2.0/24 :127.0.0.5:specific\n'
+        expect = {'0.0.0.0': '127.0.0.9', '1.2.3.4': '127.0.0.9', '10.1.1.1': None,
+                  '192.0.2.7': '127.0.0.5', '255.255.255.255': '127.0.0.9'}
+        for dstype in ('ip4set', 'ip4trie'):
+            d = DaemonCase.start(self, 'zero-' + dstype, HEADER + f'$DATASET {dstype}:set @\n' + text)
+            self.assertNotIn('invalid address', d.read_log())
+            if dstype == 'ip4set':
+                # [0, 10/8), (10/8, 192.0.2.0), the /24, (192.0.2.255, max]
+                self.assertIn(' e=3 r=4 x=1 ', d.read_log())
+            for addr, a in expect.items():
+                with self.subTest(dstype=dstype, address=addr):
+                    self.assertEqual(d.query(reverse(a_num(addr)), 1), a)
+
     def test_exclusion_of_identical_range_wins_in_either_order(self):
         d = self.start('excl', '10.0.4.0/24 :127.0.0.3:a\n!10.0.4.0/24\n'
                                '!10.0.5.0/24\n10.0.5.0/24 :127.0.0.3:b\n'
