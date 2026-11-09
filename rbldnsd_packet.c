@@ -118,11 +118,12 @@ parsequery(struct dnspacket *pkt, unsigned qlen,
   d = qry->q_dn;		/* destination lowercased DN */
   while((*d = *q) != 0) {	/* loop by DN lables */
     unsigned char label_len = *q;
-    qry->q_lptr[qlab++] = d++;	/* another label */
     e = q + label_len + 1;	/* end of this label */
     if (label_len > DNS_MAXLABEL	/* too long label? */
-        || e > x)		/* or it ends past packet? */
+        || e > x		/* or it ends past packet? */
+        || qlab >= DNS_MAXLABELS)	/* or too many labels? */
       return 0;
+    qry->q_lptr[qlab++] = d++;	/* another label */
     /* bulk copy and lowercase using SIMD */
     ++q;			/* skip length byte */
     dns_simd_lowercase(d, q, label_len);
@@ -254,11 +255,22 @@ findqzone(const struct zone *zone,
           unsigned dnlen, unsigned dnlab, unsigned char *const *const dnlptr,
           struct dnsqinfo *qi) {
   const unsigned char *q;
+  unsigned rem;
 
   for(;; zone = zone->z_next) {
     if (!zone) return NULL;
     if (zone->z_dnlab > dnlab) continue;
-    q = dnlptr[dnlab - zone->z_dnlab];
+    if (zone->z_dnlab) {
+      q = dnlptr[dnlab - zone->z_dnlab];
+      /* bytes left in the name from q, incl. terminator; a matching suffix
+       * with the same number of labels has exactly z_dnlen bytes */
+      rem = dnlen - (q - dnlptr[0]);
+    }
+    else {
+      q = dnlptr[0] + dnlen - 1; /* root zone: just the terminator */
+      rem = 1;
+    }
+    if (rem != zone->z_dnlen) continue;
     if (memcmp(zone->z_dn, q, zone->z_dnlen - 1)) continue;
     break;
   }
@@ -896,11 +908,12 @@ checkrr_present(register unsigned char *c, register unsigned char *e,
   const unsigned char dtp1 = dtp >> 8, dtp2 = dtp & 255;
   unsigned t;
 
-#define nextRR(c) ((c) + 12 + (c)[11])
-#define hasRR(c,e) ((c) < (e))
+#define rdLEN(c) (((unsigned)(c)[10] << 8) | (c)[11])
+#define nextRR(c) ((c) + 12 + rdLEN(c))
+#define hasRR(c,e) ((e) - (c) >= 12 && (unsigned)((e) - (c) - 12) >= rdLEN(c))
 #define sameRRT(c,dtp1,dtp2) ((c)[2] == (dtp1) && (c)[3] == (dtp2))
 #define sameDATA(c,dsz,data) \
-   ((c)[11] == (dsz) && memcmp((c)+12, (data), (dsz)) == 0)
+   (rdLEN(c) == (dsz) && memcmp((c)+12, (data), (dsz)) == 0)
 #define rrTTL(c) ((c)+6)
 
   for(;;) {
@@ -937,6 +950,7 @@ checkrr_present(register unsigned char *c, register unsigned char *e,
       }
     return same ? 0 : ttl;
   }
+#undef rdLEN
 #undef nextRR
 #undef hasRR
 #undef sameRRT
@@ -995,14 +1009,18 @@ static int version_req(struct dnspacket *pkt, const struct dnsquery *qry) {
       (qry->q_dnlen != 14 || memcmp(qry->q_dn, "\7version\4bind", 14)))
     return 0;
 
+  dsz = strlen(show_version);
+  if (dsz > 255)
+    dsz = 255;			/* TXT string length is a single byte */
   c = pkt->p_cur;
+  if (!fit(pkt, c, 12 + 1 + dsz))
+    return 0;
   *c++ = 192; *c++ = p_hdrsize; /* jump after header: query DN */
   *c++ = DNS_T_TXT>>8; *c++ = DNS_T_TXT;
   *c++ = DNS_C_CH>>8; *c++ = DNS_C_CH;
   *c++ = 0; *c++ = 0; *c++ = 0; *c++ = 0; /* ttl */
-  dsz = strlen(show_version) + 1;
-  PACK16(c, dsz); c += 2;       /* dsize */
-  *c++ = --dsz;
+  PACK16(c, dsz + 1); c += 2;   /* dsize */
+  *c++ = dsz;
   memcpy(c, show_version, dsz);
   pkt->p_cur = c + dsz;
   pkt->p_buf[p_ancnt2] += 1; /* increment numanswers */
