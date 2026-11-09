@@ -41,6 +41,7 @@
 #endif
 
 #ifdef WITH_JEMALLOC
+#include <stdint.h>
 #include <jemalloc/jemalloc.h>
 #else
 #ifndef NO_MEMINFO
@@ -1275,27 +1276,6 @@ static void check_expires(void) {
   }
 }
 
-#ifdef WITH_JEMALLOC
-struct jemalloc_write_cbdata {
-  char *buf;
-  size_t len;
-};
-
-static void
-jemalloc_write_cb(void *ud, const char *msg)
-{
-  struct jemalloc_write_cbdata *cbd = (struct jemalloc_write_cbdata *)ud;
-  int r;
-
-  r = ssprintf(cbd->buf, cbd->len, "%s", msg);
-
-  if (r < cbd->len) {
-    cbd->buf += r;
-    cbd->len -= r;
-  }
-}
-#endif
-
 static void
 reload_cld_cb (EV_P_ ev_child *w, int revents)
 {
@@ -1462,12 +1442,21 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 #undef sec
 #endif /* NO_TIMES */
 #ifdef WITH_JEMALLOC
-  struct jemalloc_write_cbdata cbd;
-  ibuf[ip++] = '\n';
-  cbd.buf = ibuf + ip;
-  cbd.len = sizeof(ibuf) - ip;
-  malloc_stats_print(jemalloc_write_cb, (void *)&cbd, NULL);
-  ip = cbd.buf - ibuf;
+  {
+    /* malloc_stats_print() emits several KB of options and per-arena tables;
+     * the 1 KB log line cut it off before the totals. Log the totals only. */
+    uint64_t epoch = 1;
+    size_t esz = sizeof(epoch);
+    size_t allocated = 0, active = 0, resident = 0, sz = sizeof(size_t);
+    mallctl("epoch", &epoch, &esz, &epoch, esz); /* refresh the stats */
+    mallctl("stats.allocated", &allocated, &sz, NULL, 0);
+    mallctl("stats.active", &active, &sz, NULL, 0);
+    mallctl("stats.resident", &resident, &sz, NULL, 0);
+#define kb(x) (unsigned long)(((x) + 512) >> 10)
+    ip += ssprintf(ibuf + ip, sizeof(ibuf) - ip, ", mem allocated=%lu active=%lu resident=%lu Kb",
+                   kb(allocated), kb(active), kb(resident));
+#undef kb
+  }
 #else
 #if !defined(NO_MEMINFO) && defined(__GLIBC__)
   {

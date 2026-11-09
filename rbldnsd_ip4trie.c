@@ -11,6 +11,7 @@
 struct dsdata {
   struct btrie *btrie;
   const char *def_rr;	/* default RR */
+  struct entry_cache ec;	/* shares params and entry_meta between entries */
 };
 
 definedstype_update(ip4trie, DSTF_IP4REV, "set of (ip4cidr or ip6cidr, value) pairs");
@@ -101,21 +102,20 @@ ds_ip4trie_line(struct dataset *ds, char *s, struct dsctx *dsc)
   else {
     SKIPSPACE(s);
     rbldnsd_split_entry_params(s, &params_s);
-    params = rbldnsd_parse_kv_params(ds->ds_mp, dsc, params_s);
     if (!*s || ISCOMMENT(*s))
       rr = dsd->def_rr;
     else if (!(rrl = parse_a_txt(s, &rr, dsd->def_rr, dsc)))
       return 1;
     else if (!(rr = mp_dmemdup(ds->ds_mp, rr, rrl)))
       return 0;
+    if (!rbldnsd_entry_params(ds->ds_mp, dsc, &dsd->ec, params_s, &params))
+      return 0;
   }
 
-  struct entry_meta *meta = mp_alloc(ds->ds_mp, sizeof(*meta), 1);
+  const struct entry_meta *meta = rbldnsd_entry_meta(ds->ds_mp, &dsd->ec, rr, params);
   if (!meta) {
     return 0;
   }
-  meta->rr = rr;
-  meta->params = params;
 
   int ret = -1;
 
