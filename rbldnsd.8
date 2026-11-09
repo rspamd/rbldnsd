@@ -484,6 +484,8 @@ key/value pairs separated by \fB:\fR or \fB;\fR.
 .PP
 Supported dataset types:
 .IP \(bu
+\fBip4set\fR
+.IP \(bu
 \fBip4trie\fR
 .IP \(bu
 \fBip6trie\fR
@@ -524,7 +526,6 @@ a dash, inclusive).  Examples, to specify 127.0.0.0/24:
   127.0.0.0/24
   127.0.0
   127/24
-  127\-127.0.0
   127.0.0.0\-127.0.0.255
   127.0.0.1\-255
 .fi
@@ -570,6 +571,24 @@ entry, i.e. corresponding address range is excluded from being listed
 (and any value for this record is ignored).  This may be used to specify
 large range except some individual addresses, in a compact form.
 .PP
+When entries nest or overlap, exactly one value applies to every address:
+the most specific entry wins, so a listing inside an excluded range lists
+its addresses again and an exclusion inside a listed range removes them.
+If the same range is listed more than once, an exclusion wins wherever it
+appears in the file; otherwise the first line wins.  Two
+\fIa.b.c.d\-e.f.g.h\fR ranges that overlap without one containing the
+other resolve to the entry that starts later.  An entry may be followed by
+per-entry parameters (see \fBPer-entry parameters\fR above).
+.PP
+Internally the entries are flattened at load time into a sorted array of
+disjoint address ranges, adjacent ranges with the same value are merged,
+and a lookup is a single binary search.  Memory is 8 bytes per stored
+range, plus 4 bytes per range when the entries do not all share one value,
+regardless of whether the entries are single addresses, CIDR blocks of any
+length or arbitrary ranges.  A file sorted by address loads fastest; an
+unsorted file is sorted first and the load log says so.  During the load
+the input lines are kept in a temporary array of 16 bytes per line.
+.PP
 If a line starts with a colon (:), this line specifies the default A value
 and TXT template to return (see below) for all subsequent entries up
 to end of current file.  If no default entry specified, and no value
@@ -589,10 +608,9 @@ and allows for the specification of A/TXT values on a per CIDR range
 basis.  (If multiple CIDR ranges match a query, the value for longest
 matching prefix is returned.)  Exclusions are supported too.
 .PP
-This dataset is not particularly memory-efficient for storing many
-single IP addresses \(em it uses about 50% more memory than the ip4set
-dataset in that case.  The ip4trie dataset is better adapted, however,
-for listing CIDR ranges (whose lengths are not a multiple of 8 bits.)
+For IPv4-only data the ip4set dataset uses less memory and loads faster;
+ip4trie is the choice when a dataset mixes IPv4 and IPv6 entries or needs
+dynamic updates (\fB\-U\fR).
 
 .SS "ip4tset Dataset"
 .PP
