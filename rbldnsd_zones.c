@@ -498,6 +498,8 @@ int loaddataset(struct dataset *ds, struct ev_loop *loop) {
   dsc.dsc_fname = NULL;
 
   ds->ds_type->dst_finishfn(ds, &dsc);
+  if (dsc.dsc_failed)
+    goto fail;
 
   return 1;
 

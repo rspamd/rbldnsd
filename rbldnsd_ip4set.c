@@ -138,8 +138,8 @@ ds_ip4set_line(struct dataset *ds, char *s, struct dsctx *dsc) {
     return 1;
   }
   if (dsc->dsc_ip4maxrange && dsc->dsc_ip4maxrange <= (b - a)) {
-    dswarn(dsc, "too large range (%u) ignored (%u max)",
-           b - a + 1, dsc->dsc_ip4maxrange);
+    dswarn(dsc, "too large range (%llu) ignored (%u max)",
+           (unsigned long long)b - a + 1, dsc->dsc_ip4maxrange);
     return 1;
   }
 
@@ -295,6 +295,10 @@ static int ds_ip4set_flatten(struct dsdata *dsd) {
     }
     if (e->lo && !ds_ip4set_fill(dsd, stack, &sn, &pos, (uint64_t)e->lo - 1))
       goto done;
+    /* entries that end before this one starts can never apply again; pop
+     * them now or sequential, adjacent ranges would pile up on the stack */
+    while (sn && dsd->raw[stack[sn - 1]].hi < e->lo)
+      sn--;
     if (sn == sa) {
       sa = sa ? sa * 2 : 64;
       stack = trealloc(unsigned, stack, sa);
@@ -340,6 +344,7 @@ static void ds_ip4set_finish(struct dataset *ds, struct dsctx *dsc) {
   if (!ds_ip4set_flatten(dsd) || !ds_ip4set_index(dsd)) {
     dslog(LOG_ERR, dsc, "out of memory flattening ranges");
     ds_ip4set_reset(dsd, 0);
+    dsc->dsc_failed = 1;        /* loaddataset() fails the load */
     return;
   }
   dsd->hraw = dsd->nraw;
