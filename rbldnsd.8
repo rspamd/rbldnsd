@@ -324,9 +324,18 @@ records.  It is equivalent to BIND9 "minimal\-answers" configuration
 setting.  While with \fB\-A\fR specified, \fBrbldnsd\fR will always
 fill in AUTH section, increasing size of replies dramatically but
 allowing (caching) resolver clients to react faster to changes in
-nameserver lists.  Currently (as of 1.0.0 version), non\-lazy
-(as with \fB\-A\fR) mode is the default, but it will change in
-future release.
+nameserver lists.  Lazy mode (as with \fB\-a\fR) is the default
+since version 1.1.1; earlier versions defaulted to \fB\-A\fR.
+
+.IP "\fB\-E\fR \fIsize\fR"
+Maximum size, in bytes, of a reply sent to a client which announced
+EDNS0 support, from 512 to 2048.  The default is 1232, which keeps
+replies from being fragmented on usual networks and limits how much
+a query with a forged source address can be amplified.  The size a
+client asks for is honoured up to this limit.  Clients without EDNS0
+always get at most 512 bytes.  \fBrbldnsd\fR does not serve TCP, so
+it never sets the truncation bit: records which do not fit are left
+out and the reply is marked non\-authoritative.
 
 .IP "\fB\-x\fR \fIextension\fR"
 Load the given \fIextension\fR file (a dynamically-linked library, usually
