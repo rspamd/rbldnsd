@@ -78,20 +78,31 @@ def random_entries(rnd, count):
 
 
 def with_duplicate_hosts(rnd, entries):
-    """Append /32 entries that repeat earlier /32s with another value or
-    exclusion state: an exclusion must win whichever line it is on, otherwise
-    the earlier line."""
+    """Append /32 entries that repeat earlier /32s, all after the original
+    line. Both kinds of pair are produced, alternating so every seed has
+    both: a listing followed by an exclusion (the exclusion must win), and a
+    listing followed by another listing with a different value (the FIRST
+    line must win). An originally excluded host gets a later listing, which
+    must lose to the exclusion."""
     hosts = [e for e in entries if e[1] == 32]
     extra = []
-    for start, bits, excluded, value in rnd.sample(hosts, min(20, len(hosts))):
-        extra.append((start, bits, not excluded, '' if excluded else ':127.0.0.9:dup'))
+    listings = 0
+    for start, bits, excluded, value in rnd.sample(hosts, min(24, len(hosts))):
+        if excluded:
+            extra.append((start, bits, False, ':127.0.0.9:dup'))
+        else:
+            listings += 1
+            if listings % 2:
+                extra.append((start, bits, True, ''))
+            else:
+                extra.append((start, bits, False, ':127.0.0.9:dup'))
     return entries + extra
 
 
 def oracle(entries):
     """{address: A} for every listed address of the window: longest prefix
-    wins; among identical ranges an exclusion wins, else the first line;
-    computed independently of rbldnsd."""
+    wins; among identical ranges an exclusion wins, else the first line
+    (entries are in file order); computed independently of rbldnsd."""
     listed = {}
     for n in range(WINDOW_BASE, WINDOW_BASE + WINDOW_SIZE):
         best = None
@@ -101,7 +112,7 @@ def oracle(entries):
             if best is None or bits > best[1]:
                 best = (start, bits, excluded, value)
             elif bits == best[1] and excluded and not best[2]:
-                best = (start, bits, excluded, value)   # a later exclusion of the same range wins; a later listing does not
+                best = (start, bits, excluded, value)   # a later exclusion of the same range wins; a later listing does not (first line kept)
         if best and not best[2]:
             listed[n] = best[3].split(':')[1] if best[3] else '127.0.0.2'
     return listed
@@ -120,6 +131,9 @@ class Daemon:
         self.zone = pathlib.Path(tmp) / name
         self.zone.write_text(text)
         self.log = open(pathlib.Path(tmp) / (name + '.log'), 'w+')
+        # rbldnsd cannot bind port 0 and report the port, so there is no
+        # race-free way to get a free one; pick one here and let
+        # DaemonCase.start() retry with a new port if the bind fails.
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.bind(('127.0.0.1', 0))
             self.port = s.getsockname()[1]
@@ -211,21 +225,40 @@ class DaemonCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def start(self, name, text):
-        d = Daemon(self.tmp.name, name, text)
-        self.daemons.append(d)
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            code = d.proc.poll()
-            if code is not None:
-                self.fail(f'{name}: rbldnsd exited with {code}:\n{d.read_log()}')
-            try:
-                d.query('2.0.0.127', 16)
-                while 'started' not in d.read_log() and time.time() < deadline:
+        """Start a daemon. The port is picked before the daemon binds it, so
+        another process can take it in between: when rbldnsd exits because it
+        could not bind, retry with a new port. A successful answer only counts
+        if the child is still alive afterwards and has logged 'started', so a
+        reply from a foreign process on that port is never accepted."""
+        for attempt in range(5):
+            d = Daemon(self.tmp.name, name, text)
+            self.daemons.append(d)
+            deadline = time.time() + 20
+            retry = False
+            while time.time() < deadline:
+                code = d.proc.poll()
+                if code is not None:
+                    if 'unable to bind' in d.read_log() and attempt < 4:
+                        retry = True
+                        break
+                    self.fail(f'{name}: rbldnsd exited with {code}:\n{d.read_log()}')
+                try:
+                    d.query('2.0.0.127', 16)
+                except (socket.timeout, ConnectionRefusedError, AssertionError):
+                    time.sleep(0.1)
+                    continue
+                while 'started' not in d.read_log() and d.proc.poll() is None \
+                        and time.time() < deadline:
                     time.sleep(0.05)       # the load log is written before 'started'
-                return d
-            except (socket.timeout, ConnectionRefusedError, AssertionError):
-                time.sleep(0.1)
-        self.fail(f'{name}: no answer within 20s:\n{d.read_log()}')
+                if d.proc.poll() is None and 'started' in d.read_log():
+                    return d
+                # the child died (or never started) although something
+                # answered: that was not our daemon; loop to the exit check
+            if not retry:
+                self.fail(f'{name}: no answer within 20s:\n{d.read_log()}')
+            d.stop()
+            self.daemons.remove(d)
+        self.fail(f'{name}: could not bind a UDP port after 5 attempts')
 
 
 class Ip4SetRanges(DaemonCase):
@@ -254,8 +287,18 @@ class Ip4SetRanges(DaemonCase):
                 self.assert_same_answers(trie, rng, addresses, f'seed {seed}')
                 dumped = rng.dump_a_records()
                 expected = oracle(entries)
+                # the winning line's value, to tell which answers need a key
+                winner = {}
+                for start, bits, excluded, value in entries:
+                    if bits == 32 and start in duplicated:
+                        if start not in winner or (excluded and winner[start] is not None):
+                            winner[start] = None if excluded else value
                 for n in sorted(duplicated):
-                    self.assertEqual(rng.query(reverse(n), 1), expected.get(n),
+                    # the dump lists a @key=require entry, an unkeyed query
+                    # does not get it
+                    keyed = '@key=require' in (winner[n] or '')
+                    self.assertEqual(rng.query(reverse(n), 1),
+                                     None if keyed else expected.get(n),
                                      f'seed {seed}: duplicated host {ip(n)}: exclusion, else first line, must win')
                 self.assertTrue(dumped, f'seed {seed}: empty -d dump')
                 for n in sorted(set(dumped) | set(expected)):
@@ -354,7 +397,7 @@ class Ip4SetSpellings(DaemonCase):
                 answers[spelling] = {n: d.query(reverse(n), 1) for n in samples}
             self.assertGreaterEqual(len(answers), 6)
             # Reference: the CIDR spelling, which is the first of each group.
-            reference_spelling = SPELLINGS[0 if group == '/24' else 7][1]
+            reference_spelling = {'/24': '127.0.0.0/24', '/12': '127.16.0.0/12'}[group]
             ref = answers[reference_spelling]
             for n in samples:
                 self.assertEqual(ref[n], '127.0.0.2' if first <= n <= last else None,
