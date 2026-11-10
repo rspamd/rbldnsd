@@ -457,6 +457,8 @@ struct dsctx {
   const char *dsc_fname;	/* currently loading file name */
   int dsc_lineno;		/* current line number */
   int dsc_warns;		/* number of warnings so far */
+  int dsc_failed;		/* set by a finish hook (e.g. out of memory) to
+				 * fail the whole load */
   unsigned dsc_ip4maxrange;	/* max IP4 range allowed */
 };
 

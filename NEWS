@@ -2,6 +2,22 @@ This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
 Unreleased
+ - ip4set is reimplemented on a sorted array of disjoint ranges (based on
+   the ip4range proposal in PR #22): 8 bytes per stored range instead of
+   16 bytes per octet-aligned entry, CIDR blocks of any length no longer
+   expand into many entries, and a lookup is one binary search.
+   Behaviour changes: nested entries resolve to the most specific one
+   (previously a /25 and a /26 covering the same address both answered);
+   an address listed twice with different values answers with the first
+   line only (previously both A records); a listing nested inside an
+   exclusion is listed even when both expand to the same octet level
+   (previously "!10.0.0.0/23" excluded a later "10.0.0.0/24"); an
+   exclusion of an identical range wins wherever it appears; per-entry
+   @params are accepted, so a value is cut at a " @" token like in
+   ip4trie; a /0 entry is accepted as a fallback covering every address
+   (previously "invalid address").
+ - Fix dump_ip4range() printing four billion records for a range that
+   spans two partial /24 blocks with nothing whole between them.
  - Replies no longer carry the NS list in the AUTH section by default
    (lazy mode, as with -a).  Use -A to get the previous behaviour.
  - Limit replies to EDNS0 clients to 1232 bytes by default instead of 2048,

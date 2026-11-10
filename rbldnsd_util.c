@@ -306,6 +306,8 @@ dump_ip4octets(FILE *f, unsigned idx, ip4addr_t a, unsigned cnt,
      "%u.%u.%u.%u", "*.%u.%u.%u", "*.%u.%u", "*.%u"
   };
   const unsigned bits = 8 * idx;
+  if (!cnt)
+    return;
   for(;;) {
     sprintf(name, fmt[idx], a&255, (a>>8)&255, (a>>16)&255, (a>>24));
     dump_a_txt(name, rr, ip4atos(a<<bits), ds, f);
@@ -339,7 +341,11 @@ void dump_ip4range(ip4addr_t a, ip4addr_t b, const char *rr,
     b = (b >> 8) - 1;                             \
   }                                               \
   else                                            \
-    b >>= 8
+    b >>= 8;                                      \
+  /* two partial blocks with nothing whole between them: done (a count of \
+   * zero below would wrap in dump_ip4octets) */  \
+  if (a > b)                                      \
+    return
 
   ip4range_expand_octet(0);
   ip4range_expand_octet(8);
