@@ -2,6 +2,20 @@ This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
 Unreleased
+ - ip4trie/ip6trie: duplicated prefixes are resolved consistently. The
+   first entry is kept, and an exclusion always wins over a listing of the
+   same prefix whatever the order. 1.1.0 started storing IPv4 entries as
+   128-bit keys, which changed the trie shape so that for most duplicated
+   /32s the later line silently replaced the earlier one: a dataset that
+   delists an address near the top and still lists it further down served
+   it as listed, where 1.0.x served NXDOMAIN. btrie_add_prefix() no longer
+   overwrites; the new btrie_replace_prefix() does so explicitly.
+   Dynamic updates (-U) of an ip4trie prefix that is already present still
+   replace its value, including relisting an excluded address.
+ - acl: a duplicated prefix now always keeps the first entry (previously
+   the later one won for some trie shapes); the warning says so.
+ - Fix -U: the update socket was indexed with the count of listening
+   sockets, so rbldnsd always exited with "unable to listen for updates".
  - A combined zone specification may carry a dataset type override,
    combined[from=to,...]:file: every $DATASET line in the file that names
    type `from' is loaded as type `to'. Meant for data files shared with

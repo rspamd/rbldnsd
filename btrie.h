@@ -67,9 +67,17 @@ enum btrie_result {
   BTRIE_DUPLICATE_PREFIX = 1
 };
 
+/* Add a prefix.  If the exact prefix is already present its data is kept
+ * and BTRIE_DUPLICATE_PREFIX is returned. */
 enum btrie_result btrie_add_prefix(struct btrie *btrie,
                                    const btrie_oct_t *prefix, unsigned len,
                                    const void *data);
+
+/* Like btrie_add_prefix(), but an already present prefix gets its data
+ * replaced (the result is still BTRIE_DUPLICATE_PREFIX). */
+enum btrie_result btrie_replace_prefix(struct btrie *btrie,
+                                       const btrie_oct_t *prefix, unsigned len,
+                                       const void *data);
 
 const void *btrie_lookup(const struct btrie *btrie,
                          const btrie_oct_t *pfx, unsigned len);

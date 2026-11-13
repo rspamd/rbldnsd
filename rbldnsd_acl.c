@@ -163,7 +163,7 @@ ds_acl_line(struct dataset *ds, char *s, struct dsctx *dsc) {
   case BTRIE_OKAY:
     return 1;
   case BTRIE_DUPLICATE_PREFIX:
-    dswarn(dsc, "duplicated entry for %s/%d", ipstring, bits);
+    dswarn(dsc, "duplicated entry for %s/%d (first entry kept)", ipstring, bits);
     return 1;
   case BTRIE_ALLOC_FAILED:
   default:

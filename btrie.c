@@ -1260,9 +1260,16 @@ init_tbm_node(struct btrie *btrie, node_t *dst, unsigned pos,
 }
 
 
+/* Insert prefix with data.  If the exact prefix is already present its data
+ * is kept (replace == 0) or overwritten (replace != 0) and
+ * BTRIE_DUPLICATE_PREFIX is returned either way.  Both places a prefix can
+ * live, a terminal LC node and the internal data of a TBM node, follow the
+ * same rule, so the outcome of a duplicate does not depend on the shape of
+ * the trie around it. */
 static enum btrie_result
-add_to_trie(struct btrie *btrie, node_t *node, unsigned pos,
-            const btrie_oct_t *prefix, unsigned len, const void *data)
+add_to_trie_ex(struct btrie *btrie, node_t *node, unsigned pos,
+               const btrie_oct_t *prefix, unsigned len, const void *data,
+               int replace)
 {
   for (;;) {
     if (is_lc_node(node)) {
@@ -1280,11 +1287,8 @@ add_to_trie(struct btrie *btrie, node_t *node, unsigned pos,
       }
       else if (clen == end && len == end && lc_is_terminal(lc_node)) {
         /* exact match for terminal node - already have data for prefix */
-        /* ret, ret, ret! allow data rewriting */
-        if (lc_node->ptr.data != data) {
+        if (replace)
           lc_node->ptr.data = data;
-        }
-
         return BTRIE_DUPLICATE_PREFIX;
       }
       else {
@@ -1314,8 +1318,13 @@ add_to_trie(struct btrie *btrie, node_t *node, unsigned pos,
         unsigned plen = len - pos;
         unsigned pfx = extract_bits(prefix, pos, plen);
 
-        if (tbm_data_p(tbm_node, pfx, plen) != NULL)
-          return BTRIE_DUPLICATE_PREFIX; /* prefix already has data */
+        const void **data_p = tbm_data_p(tbm_node, pfx, plen);
+        if (data_p != NULL) {
+          /* prefix already has data */
+          if (replace)
+            *data_p = data;
+          return BTRIE_DUPLICATE_PREFIX;
+        }
         else {
           tbm_insert_data(btrie, tbm_node, pfx, plen, data);
           btrie->n_entries++;
@@ -1333,6 +1342,13 @@ add_to_trie(struct btrie *btrie, node_t *node, unsigned pos,
       }
     }
   }
+}
+
+static enum btrie_result
+add_to_trie(struct btrie *btrie, node_t *node, unsigned pos,
+            const btrie_oct_t *prefix, unsigned len, const void *data)
+{
+  return add_to_trie_ex(btrie, node, pos, prefix, len, data, 0);
 }
 
 static const void *
@@ -1425,6 +1441,17 @@ btrie_add_prefix(struct btrie *btrie,
     return rv;                  /* out of memory */
 
   return add_to_trie(btrie, &btrie->root, 0, prefix, len, data);
+}
+
+enum btrie_result
+btrie_replace_prefix(struct btrie *btrie,
+                     const btrie_oct_t *prefix, unsigned len, const void *data)
+{
+  enum btrie_result rv;
+  if ((rv = setjmp(btrie->exception)) != 0)
+    return rv;                  /* out of memory */
+
+  return add_to_trie_ex(btrie, &btrie->root, 0, prefix, len, data, 1);
 }
 
 const void *
@@ -2322,6 +2349,7 @@ test_add_to_trie()
 {
   struct btrie *btrie = btrie_init(NULL);
   const void *data = (void *)0xdeadbeef;
+  const void *data2 = (void *)0xfeedface;
   enum btrie_result result;
   unsigned pfx, plen;
   node_t root;
@@ -2339,6 +2367,18 @@ test_add_to_trie()
   result = add_to_trie(btrie, &root, 0,
                        numbered_bytes, 8 * 2 * LC_BYTES_PER_NODE, data);
   assert(result == BTRIE_DUPLICATE_PREFIX);
+
+  /* duplicate of a terminal LC node keeps the first data unless replacing */
+  result = add_to_trie(btrie, &root, 0,
+                       numbered_bytes, 8 * 2 * LC_BYTES_PER_NODE, data2);
+  assert(result == BTRIE_DUPLICATE_PREFIX);
+  check_terminal_lc_node(&root.lc_node.ptr.child->lc_node,
+                          8 * LC_BYTES_PER_NODE, data);
+  result = add_to_trie_ex(btrie, &root, 0,
+                          numbered_bytes, 8 * 2 * LC_BYTES_PER_NODE, data2, 1);
+  assert(result == BTRIE_DUPLICATE_PREFIX);
+  check_terminal_lc_node(&root.lc_node.ptr.child->lc_node,
+                          8 * LC_BYTES_PER_NODE, data2);
 
   /* test can insert new TBM node within existing LC node */
   result = add_to_trie(btrie, &root, 0,
@@ -2371,6 +2411,14 @@ test_add_to_trie()
 
       result = add_to_trie(btrie, &root, 0, &prefix0, plen, data);
       assert(result == BTRIE_DUPLICATE_PREFIX);
+
+      /* internal TBM data: duplicate keeps the first data unless replacing */
+      result = add_to_trie(btrie, &root, 0, &prefix0, plen, data2);
+      assert(result == BTRIE_DUPLICATE_PREFIX);
+      assert(*tbm_data_p(&root.tbm_node, pfx, plen) == data);
+      result = add_to_trie_ex(btrie, &root, 0, &prefix0, plen, data2, 1);
+      assert(result == BTRIE_DUPLICATE_PREFIX);
+      assert(*tbm_data_p(&root.tbm_node, pfx, plen) == data2);
     }
   }
 
