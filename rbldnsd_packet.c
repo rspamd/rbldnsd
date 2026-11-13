@@ -26,6 +26,7 @@
 #endif
 
 #define MAX_GLUE (MAX_NS*2)
+#define EDNS_R_BADVERS 16	/* extended rcode: unsupported EDNS version */
 
 static int addrr_soa(struct dnspacket *pkt, const struct zone *zone, int auth);
 static int addrr_ns(struct dnspacket *pkt, const struct zone *zone, int auth);
@@ -78,7 +79,8 @@ parsequery(struct dnspacket *pkt, unsigned qlen,
    * first p_hdrsize bytes is header, next is query DN,
    * next are QTYPE and QCLASS (2x2 bytes).
    * If NSCNT==0 && ARCNT==1, and an OPT record comes after the query,
-   * EDNS0 packet size gets extracted from the OPT record.
+   * EDNS0 packet size and version get extracted from the OPT record,
+   * and pkt->p_edns is set so that the reply carries an OPT record too.
    * Rest of data is ignored.
    * Returns true on success, 0 on failure.
    * Upon successeful return, pkt->p_sans = pkt->p_cur points to the end of
@@ -86,17 +88,16 @@ parsequery(struct dnspacket *pkt, unsigned qlen,
    * pkt->p_endp is initialized to point to the real end of answers.
    * Real end of answers is:
    * for non-EDNS0-aware clients it's pkt->p_buf+DNS_MAXPACKET, and
-   * if a vaild EDNS0 UDPsize is given, it will be pkt->p_buf+UDPsize-11,
-   * with the 11 bytes needed for a minimal OPT record.
-   * In replypacket() we check whenever all our answers fits in standard
-   * UDP buffer size (DNS_MAXPACKET), and if not (which means we're replying
-   * to EDNS0-aware client due to the above rules), we just add proper OPT
-   * record at the end.
+   * for EDNS0 clients it's pkt->p_buf+UDPsize-DNS_EDNS0_OPTSIZE, where
+   * UDPsize is the size the client gave, limited to
+   * DNS_MAXPACKET..edns_maxpacket, and the reserved bytes are for the
+   * minimal OPT record replypacket() appends to every reply to such client.
    */
 
   register unsigned const char *q = pkt->p_buf;
   register unsigned const char *x, *e;
   register unsigned char *d;
+  unsigned const char *const pend = q + qlen; /* end of received data */
   unsigned qlab;			/* number of labels in qDN */
 
   x = q + qlen - 5;	/* last possible qDN zero terminator position */
@@ -118,11 +119,12 @@ parsequery(struct dnspacket *pkt, unsigned qlen,
   d = qry->q_dn;		/* destination lowercased DN */
   while((*d = *q) != 0) {	/* loop by DN lables */
     unsigned char label_len = *q;
-    qry->q_lptr[qlab++] = d++;	/* another label */
     e = q + label_len + 1;	/* end of this label */
     if (label_len > DNS_MAXLABEL	/* too long label? */
-        || e > x)		/* or it ends past packet? */
+        || e > x		/* or it ends past packet? */
+        || qlab >= DNS_MAXLABELS)	/* or too many labels? */
       return 0;
+    qry->q_lptr[qlab++] = d++;	/* another label */
     /* bulk copy and lowercase using SIMD */
     ++q;			/* skip length byte */
     dns_simd_lowercase(d, q, label_len);
@@ -142,23 +144,25 @@ parsequery(struct dnspacket *pkt, unsigned qlen,
   pkt->p_sans = (unsigned char *)q; /* answers will start here */
   pkt->p_cur = (unsigned char *)q;  /* and current answer pointer is here */
   d = pkt->p_buf;
-  if (q < x &&
+  if (pend - q >= DNS_EDNS0_OPTSIZE &&	/* whole OPT RR is here */
       d[p_nscnt1] == 0 && d[p_nscnt2] == 0 &&
       d[p_arcnt1] == 0 && d[p_arcnt2] == 1 &&
       q[0] == 0 /* empty DN */ &&
       q[1] == (DNS_T_OPT>>8) && q[2] == (DNS_T_OPT&255)) {
     qlen = (((unsigned)q[3]) << 8) | q[4];
-    /* 11 bytes are needed to encode minimal EDNS0 OPT record */
-    if (qlen < DNS_MAXPACKET + 11)
+    if (qlen < DNS_MAXPACKET)
       qlen = DNS_MAXPACKET;
-    else if (qlen > sizeof(pkt->p_buf) - 11)
-      qlen = sizeof(pkt->p_buf) - 11;
-    else
-      qlen -= 11;
-    pkt->p_endp = d + qlen;
+    else if (qlen > edns_maxpacket)
+      qlen = edns_maxpacket;
+    /* reserve room for our OPT record */
+    pkt->p_endp = d + qlen - DNS_EDNS0_OPTSIZE;
+    pkt->p_edns = 1;
+    pkt->p_ednsver = q[6];	/* q[5] is extended rcode */
   }
-  else
+  else {
     pkt->p_endp = d + DNS_MAXPACKET;
+    pkt->p_edns = 0;
+  }
 
   return 1;
 }
@@ -254,11 +258,22 @@ findqzone(const struct zone *zone,
           unsigned dnlen, unsigned dnlab, unsigned char *const *const dnlptr,
           struct dnsqinfo *qi) {
   const unsigned char *q;
+  unsigned rem;
 
   for(;; zone = zone->z_next) {
     if (!zone) return NULL;
     if (zone->z_dnlab > dnlab) continue;
-    q = dnlptr[dnlab - zone->z_dnlab];
+    if (zone->z_dnlab) {
+      q = dnlptr[dnlab - zone->z_dnlab];
+      /* bytes left in the name from q, incl. terminator; a matching suffix
+       * with the same number of labels has exactly z_dnlen bytes */
+      rem = dnlen - (q - dnlptr[0]);
+    }
+    else {
+      q = dnlptr[0] + dnlen - 1; /* root zone: just the terminator */
+      rem = 1;
+    }
+    if (rem != zone->z_dnlen) continue;
     if (memcmp(zone->z_dn, q, zone->z_dnlen - 1)) continue;
     break;
   }
@@ -279,6 +294,24 @@ findqzone(const struct zone *zone,
 # define do_stats(x) x
 #endif
 
+/* finish a reply: add OPT record if the query had one.
+ * parsequery() reserved DNS_EDNS0_OPTSIZE bytes past p_endp for it.
+ * ercode is upper 8 bits of extended rcode.  Returns reply length. */
+static int finishreply(struct dnspacket *pkt, unsigned ercode) {
+  if (pkt->p_edns) {
+    register unsigned char *c = pkt->p_cur;
+    *c++ = 0;			/* empty (root) DN */
+    PACK16S(c, DNS_T_OPT);
+    PACK16S(c, edns_maxpacket);	/* our UDP payload size */
+    *c++ = ercode; *c++ = 0;	/* extended RCODE and version */
+    *c++ = 0; *c++ = 0;		/* flags */
+    *c++ = 0; *c++ = 0;		/* RDLEN */
+    pkt->p_cur = c;
+    pkt->p_buf[p_arcnt2] += 1;	/* arcnt is limited to 254 records */
+  }
+  return pkt->p_cur - pkt->p_buf;
+}
+
 /* construct reply to a query. */
 int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct dnsqinfo *qi) {
 
@@ -289,6 +322,10 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
   extern int lazy; /*XXX hack*/
 
   pkt->p_substrr = 0;
+  /* per-packet state: p_sans stays NULL until parsequery() succeeds */
+  pkt->p_sans = pkt->p_cur = NULL;
+  qi->qi_tflag = 0;
+  qi->qi_additional = NULL;
   /* check global ACL */
   if (g_dsacl && g_dsacl->ds_stamp) {
     found = ds_acl_query(g_dsacl, pkt);
@@ -329,10 +366,19 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
     refuse(DNS_R_NOTIMPL);
   }
   h[p_f1] |= pf1_qr;
+  if (pkt->p_edns && pkt->p_ednsver != 0) {
+    /* BADVERS (16): lower 4 bits go to the header, the rest to OPT */
+    setnonauth(h);
+    h[p_f2] = EDNS_R_BADVERS & pf2_rcode;
+    finishreply(pkt, EDNS_R_BADVERS >> 4);
+    do_stats(gstats.q_err += 1; gstats.b_in += qlen; gstats.b_out += rlen());
+    return rlen();
+  }
   if (qry.q_class == DNS_C_IN)
     h[p_f1] |= pf1_aa;
   else if (qry.q_class != DNS_C_ANY) {
     if (version_req(pkt, &qry)) {
+      finishreply(pkt, 0);
       do_stats(gstats.q_ok += 1; gstats.b_in += qlen; gstats.b_out += rlen());
       return rlen();
     }
@@ -470,28 +516,17 @@ int replypacket(struct dnspacket *pkt, unsigned qlen, struct zone *zone, struct 
     do_stats(zone->z_stats.q_ok += 1);
   }
   (void)call_hook(query_result, (pkt->p_peer, zone, qi, found));
-  if (rlen() > DNS_MAXPACKET) {	/* add OPT record for long replies */
-    /* as per parsequery(), we always have 11 bytes for minimal OPT record at
-     * the end of our reply packet, OR rlen() does not exceed DNS_MAXPACKET */
-    h[p_arcnt2] += 1;		/* arcnt is limited to 254 records */
-    h = pkt->p_cur;
-    *h++ = 0;			/* empty (root) DN */
-    PACK16S(h, DNS_T_OPT);
-    PACK16S(h, DNS_EDNS0_MAXPACKET);
-    *h++ = 0; *h++ = 0;		/* RCODE and version */
-    *h++ = 0; *h++ = 0;		/* rest of the TTL field */
-    *h++ = 0; *h++ = 0;		/* RDLEN */
-    pkt->p_cur = h;
-    h = pkt->p_buf;		/* restore for rlen() to work */
-  }
+  finishreply(pkt, 0);
   do_stats(zone->z_stats.b_out += rlen());
   return rlen();
 
 err_nz:
+  finishreply(pkt, 0);
   do_stats(gstats.q_err += 1; gstats.b_in += qlen; gstats.b_out += rlen());
   return rlen();
 
 err_z:
+  finishreply(pkt, 0);
   do_stats(zone->z_stats.q_err += 1; zone->z_stats.b_out += rlen());
   return rlen();
 }
@@ -896,11 +931,12 @@ checkrr_present(register unsigned char *c, register unsigned char *e,
   const unsigned char dtp1 = dtp >> 8, dtp2 = dtp & 255;
   unsigned t;
 
-#define nextRR(c) ((c) + 12 + (c)[11])
-#define hasRR(c,e) ((c) < (e))
+#define rdLEN(c) (((unsigned)(c)[10] << 8) | (c)[11])
+#define nextRR(c) ((c) + 12 + rdLEN(c))
+#define hasRR(c,e) ((e) - (c) >= 12 && (unsigned)((e) - (c) - 12) >= rdLEN(c))
 #define sameRRT(c,dtp1,dtp2) ((c)[2] == (dtp1) && (c)[3] == (dtp2))
 #define sameDATA(c,dsz,data) \
-   ((c)[11] == (dsz) && memcmp((c)+12, (data), (dsz)) == 0)
+   (rdLEN(c) == (dsz) && memcmp((c)+12, (data), (dsz)) == 0)
 #define rrTTL(c) ((c)+6)
 
   for(;;) {
@@ -937,6 +973,7 @@ checkrr_present(register unsigned char *c, register unsigned char *e,
       }
     return same ? 0 : ttl;
   }
+#undef rdLEN
 #undef nextRR
 #undef hasRR
 #undef sameRRT
@@ -995,14 +1032,18 @@ static int version_req(struct dnspacket *pkt, const struct dnsquery *qry) {
       (qry->q_dnlen != 14 || memcmp(qry->q_dn, "\7version\4bind", 14)))
     return 0;
 
+  dsz = strlen(show_version);
+  if (dsz > 255)
+    dsz = 255;			/* TXT string length is a single byte */
   c = pkt->p_cur;
+  if (!fit(pkt, c, 12 + 1 + dsz))
+    return 0;
   *c++ = 192; *c++ = p_hdrsize; /* jump after header: query DN */
   *c++ = DNS_T_TXT>>8; *c++ = DNS_T_TXT;
   *c++ = DNS_C_CH>>8; *c++ = DNS_C_CH;
   *c++ = 0; *c++ = 0; *c++ = 0; *c++ = 0; /* ttl */
-  dsz = strlen(show_version) + 1;
-  PACK16(c, dsz); c += 2;       /* dsize */
-  *c++ = --dsz;
+  PACK16(c, dsz + 1); c += 2;   /* dsize */
+  *c++ = dsz;
   memcpy(c, show_version, dsz);
   pkt->p_cur = c + dsz;
   pkt->p_buf[p_ancnt2] += 1; /* increment numanswers */
@@ -1011,9 +1052,11 @@ static int version_req(struct dnspacket *pkt, const struct dnsquery *qry) {
 
 void logreply(const struct dnspacket *pkt, FILE *flog,
     int flushlog, const struct dnsqinfo *qi, unsigned reply_len) {
-  char cbuf[DNS_MAXDOMAIN + IPSIZE + 51 + DNS_MAXLABEL];
+  /* besides name, addr and key: time 21, ' ' x3, type 9, class 10, rcode 8,
+   * ':' '/' x2, counts 3 + 11, '\n', NUL = 71 + slack */
+  char cbuf[DNS_MAXDOMAIN + IPSIZE + 72 + DNS_MAXLABEL];
   char *cp = cbuf;
-  const unsigned char *const q = pkt->p_sans - 4;
+  const unsigned char *q;
 
   cp += sprintf(cp, "%lu ", (unsigned long)time(NULL));
 #ifndef NO_IPv6
@@ -1028,6 +1071,11 @@ void logreply(const struct dnspacket *pkt, FILE *flog,
   cp += strlen(cp);
 #endif
   *cp++ = ' ';
+  if (!pkt->p_sans) {	/* query was not parsed: do not look at the packet */
+    cp += sprintf(cp, "? malformed: drop\n");
+    goto out;
+  }
+  q = pkt->p_sans - 4;
   cp += dns_dntop(pkt->p_buf + p_hdrsize, cp, DNS_MAXDOMAIN);
 
   if (reply_len > 0) {
@@ -1044,15 +1092,17 @@ void logreply(const struct dnspacket *pkt, FILE *flog,
   }
 
   if (qi->qi_tflag & NSQUERY_KEY && qi->qi_additional) {
-    int len = strlen(qi->qi_additional);
+    const char *key = qi->qi_additional, *e = memchr(key, 0, DNS_MAXLABEL);
+    size_t len = e ? (size_t)(e - key) : DNS_MAXLABEL;
 
     *cp++ = ' ';
-    memcpy(cp, qi->qi_additional, len);
+    memcpy(cp, key, len);
     cp += len;
   }
 
   *cp++ = '\n';
 
+out:
   if (flushlog)
     write(fileno(flog), cbuf, cp - cbuf);
   else

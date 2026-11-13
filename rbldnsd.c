@@ -41,6 +41,7 @@
 #endif
 
 #ifdef WITH_JEMALLOC
+#include <stdint.h>
 #include <jemalloc/jemalloc.h>
 #else
 #ifndef NO_MEMINFO
@@ -132,7 +133,8 @@ static FILE *flog;		/* log file */
 static int flushlog;		/* flush log after each line */
 static struct zone *zonelist;	/* list of zones we're authoritative for */
 static int numzones;		/* number of zones in zonelist */
-int lazy;			/* don't return AUTH section by default */
+int lazy = 1;			/* don't return AUTH section by default */
+unsigned edns_maxpacket = DNS_EDNS0_DEFPACKET; /* EDNS0 reply size limit */
 static int fork_on_reload; /* >0 - perform fork on reloads, <0 - this is a child of reloading parent */
 static int can_reload; /* block reload when another reload is there */
 static int pending_reload = 0;
@@ -242,9 +244,10 @@ static void NORETURN usage(int exitcode) {
 #endif
 " -a - omit AUTH section from regular replies, do not return list of\n"
 "  nameservers, but only return NS info when explicitly asked.\n"
-"  This is an equivalent of bind9 \"minimal-answers\" setting.\n"
-"  In future versions this mode will be the default.\n"
+"  This is an equivalent of bind9 \"minimal-answers\" setting (default).\n"
 " -A - put AUTH section in every reply.\n"
+" -E size - max size of a reply to an EDNS0 client, 512..2048 bytes\n"
+"  (default is 1232, which avoids IP fragmentation)\n"
 " -F facility - Log facility for syslog. Default is 'daemon'.\n"
 #ifndef NO_ZLIB
 " -C - disable on-the-fly decompression of dataset files\n"
@@ -370,7 +373,7 @@ static int newsocket_unix(const char *path)
   sds *elts = sdssplitlen(path, strlen(path), ":", 1, &nelts);
   struct sockaddr_un un;
   unsigned mode = 00644;
-  size_t pwlen;
+  long pwlen;			/* sysconf() returns -1 when there is no limit (musl) */
   char *pwbuf, *p;
   struct passwd pw, *ppw;
   struct group gr, *pgr;
@@ -626,7 +629,7 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
     usage(1);
   }
 
-  while ((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:T:O:R:")) != EOF) {
+  while ((c = getopt(argc, argv, "u:r:b:w:t:c:p:nel:qs:h46dvaAfF:Cx:X:DU:W:M:B:T:O:R:E:")) != EOF) {
     switch (c) {
     case 'O': {
       char *end;
@@ -640,6 +643,16 @@ static void init(int argc, char **argv, struct ev_loop *loop) {
     case 'R':
       ratelimit_path = optarg;
       break;
+    case 'E': {
+      char *end;
+      unsigned long n = strtoul(optarg, &end, 10);
+      if (!*optarg || *end || n < DNS_MAXPACKET || n > DNS_EDNS0_MAXPACKET) {
+        error(0, "invalid EDNS0 reply size (expected %d..%d)",
+              DNS_MAXPACKET, DNS_EDNS0_MAXPACKET);
+      }
+      edns_maxpacket = n;
+      break;
+    }
     case 'M':
       control_path = optarg;
       break;
@@ -1281,27 +1294,6 @@ static void check_expires(void) {
   }
 }
 
-#ifdef WITH_JEMALLOC
-struct jemalloc_write_cbdata {
-  char *buf;
-  size_t len;
-};
-
-static void
-jemalloc_write_cb(void *ud, const char *msg)
-{
-  struct jemalloc_write_cbdata *cbd = (struct jemalloc_write_cbdata *)ud;
-  int r;
-
-  r = ssprintf(cbd->buf, cbd->len, "%s", msg);
-
-  if (r < cbd->len) {
-    cbd->buf += r;
-    cbd->len -= r;
-  }
-}
-#endif
-
 static void
 reload_cld_cb (EV_P_ ev_child *w, int revents)
 {
@@ -1468,12 +1460,21 @@ static int do_reload(int do_fork, struct ev_loop *loop) {
 #undef sec
 #endif /* NO_TIMES */
 #ifdef WITH_JEMALLOC
-  struct jemalloc_write_cbdata cbd;
-  ibuf[ip++] = '\n';
-  cbd.buf = ibuf + ip;
-  cbd.len = sizeof(ibuf) - ip;
-  malloc_stats_print(jemalloc_write_cb, (void *)&cbd, NULL);
-  ip = cbd.buf - ibuf;
+  {
+    /* malloc_stats_print() emits several KB of options and per-arena tables;
+     * the 1 KB log line cut it off before the totals. Log the totals only. */
+    uint64_t epoch = 1;
+    size_t esz = sizeof(epoch);
+    size_t allocated = 0, active = 0, resident = 0, sz = sizeof(size_t);
+    mallctl("epoch", &epoch, &esz, &epoch, esz); /* refresh the stats */
+    mallctl("stats.allocated", &allocated, &sz, NULL, 0);
+    mallctl("stats.active", &active, &sz, NULL, 0);
+    mallctl("stats.resident", &resident, &sz, NULL, 0);
+#define kb(x) (unsigned long)(((x) + 512) >> 10)
+    ip += ssprintf(ibuf + ip, sizeof(ibuf) - ip, ", mem allocated=%lu active=%lu resident=%lu Kb",
+                   kb(allocated), kb(active), kb(resident));
+#undef kb
+  }
 #else
 #if !defined(NO_MEMINFO) && defined(__GLIBC__)
   {

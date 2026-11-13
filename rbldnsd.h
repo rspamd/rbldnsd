@@ -53,6 +53,8 @@ struct dnspacket {		/* private structure */
   const struct sockaddr *p_peer;/* address of the requesting client */
   unsigned p_peerlen;
   unsigned p_delay_ms;          /* optional delay requested by entry params */
+  int p_edns;			/* query has an OPT record: reply with one */
+  unsigned p_ednsver;		/* EDNS version given in the query */
 };
 
 struct kv_pair {
@@ -96,9 +98,39 @@ int rbldnsd_apply_entry_params(const struct sockaddr *requestor,
 time_t rbldnsd_cached_time(void);
 
 char *rbldnsd_split_entry_params(char *s, char **params_out);
-const struct kv_params *rbldnsd_parse_kv_params(struct mempool *mp,
-                                                struct dsctx *dsc,
-                                                const char *s);
+
+/* Per-dataset caches that let entries with equal values share one parsed
+ * @params block and one entry_meta, even when values alternate. A handful
+ * of distinct values in any order (return codes, TXT templates, exclusions)
+ * is the common case; entries with unique values just miss. Reset it
+ * together with the dataset's mempool. */
+#define ENTRY_CACHE_SLOTS 16
+#define ENTRY_CACHE_PARAMS_MAX 64	/* longer @params texts are not cached */
+
+struct entry_cache {
+  struct {
+    unsigned len;			/* 0: empty slot */
+    const struct kv_params *params;
+    char text[ENTRY_CACHE_PARAMS_MAX];
+  } p[ENTRY_CACHE_SLOTS];
+  struct {
+    const struct entry_meta *meta;	/* NULL: empty slot */
+    const char *rr;
+    const struct kv_params *params;
+  } m[ENTRY_CACHE_SLOTS];
+  unsigned pnext, mnext;
+};
+
+/* Parse the @params text s (may be NULL). *out is NULL when there are no
+ * valid params. Returns 0 only on allocation failure. */
+int rbldnsd_entry_params(struct mempool *mp, struct dsctx *dsc,
+                         struct entry_cache *ec, const char *s,
+                         const struct kv_params **out);
+/* The shared entry_meta for (rr, params); NULL on allocation failure. */
+const struct entry_meta *rbldnsd_entry_meta(struct mempool *mp,
+                                            struct entry_cache *ec,
+                                            const char *rr,
+                                            const struct kv_params *params);
 struct dnsquery {	/* q */
   unsigned q_type;			/* query RR type */
   unsigned q_class;			/* query class */
@@ -425,6 +457,8 @@ struct dsctx {
   const char *dsc_fname;	/* currently loading file name */
   int dsc_lineno;		/* current line number */
   int dsc_warns;		/* number of warnings so far */
+  int dsc_failed;		/* set by a finish hook (e.g. out of memory) to
+				 * fail the whole load */
   unsigned dsc_ip4maxrange;	/* max IP4 range allowed */
 };
 
@@ -440,6 +474,7 @@ int ds_combined_newset(struct dataset *ds, char *line, struct dsctx *dsc);
 extern unsigned def_ttl, min_ttl, max_ttl;
 extern const char def_rr[5];
 extern int accept_in_cidr;
+extern unsigned edns_maxpacket;	/* max size of reply to EDNS0 client */
 extern int nouncompress;
 extern struct dataset *g_dsacl;	/* global acl */
 extern struct dataset *g_dsaclkey;	/* global acl key */
