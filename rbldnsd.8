@@ -311,9 +311,12 @@ with \fB\-d\fR.  Zone file will have appropriate $ORIGIN tags.  Note
 that data generated may be really huge (as BIND format isn't appropriate
 for this sort of things), and some entries may not be really the same
 in BIND as in \fBrbldnsd\fR (e.g., IP netblocks of large size will be
-represented as wildcard entries \- 10.0.0.0/8 will become *.10; excluded
-entries will be represented by a CNAME to `excluded' name, so such name
-should not be present in a data set).  In this mode, \fBrbldnsd\fR ignores
+represented as wildcard entries \- 10.0.0.0/8 will become *.10; for
+datasets that keep exclusions as entries (dnset, ip4trie, ip6trie) an
+excluded entry is represented by a CNAME to the `excluded' name, so such
+name should not be present in a data set, while ip4set resolves its
+exclusions at load time and the dump simply omits the excluded
+addresses).  In this mode, \fBrbldnsd\fR ignores
 \fB\-r\fR (root directory) option.
 
 .IP \fB\-v\fR
@@ -337,9 +340,18 @@ records.  It is equivalent to BIND9 "minimal\-answers" configuration
 setting.  While with \fB\-A\fR specified, \fBrbldnsd\fR will always
 fill in AUTH section, increasing size of replies dramatically but
 allowing (caching) resolver clients to react faster to changes in
-nameserver lists.  Currently (as of 1.0.0 version), non\-lazy
-(as with \fB\-A\fR) mode is the default, but it will change in
-future release.
+nameserver lists.  Lazy mode (as with \fB\-a\fR) is the default
+since version 1.1.1; earlier versions defaulted to \fB\-A\fR.
+
+.IP "\fB\-E\fR \fIsize\fR"
+Maximum size, in bytes, of a reply sent to a client which announced
+EDNS0 support, from 512 to 2048.  The default is 1232, which keeps
+replies from being fragmented on usual networks and limits how much
+a query with a forged source address can be amplified.  The size a
+client asks for is honoured up to this limit.  Clients without EDNS0
+always get at most 512 bytes.  \fBrbldnsd\fR does not serve TCP, so
+it never sets the truncation bit: records which do not fit are left
+out and the reply is marked non\-authoritative.
 
 .IP "\fB\-x\fR \fIextension\fR"
 Load the given \fIextension\fR file (a dynamically-linked library, usually
@@ -500,6 +512,8 @@ key/value pairs separated by \fB:\fR or \fB;\fR.
 .PP
 Supported dataset types:
 .IP \(bu
+\fBip4set\fR
+.IP \(bu
 \fBip4trie\fR
 .IP \(bu
 \fBip6trie\fR
@@ -540,7 +554,6 @@ a dash, inclusive).  Examples, to specify 127.0.0.0/24:
   127.0.0.0/24
   127.0.0
   127/24
-  127\-127.0.0
   127.0.0.0\-127.0.0.255
   127.0.0.1\-255
 .fi
@@ -586,6 +599,26 @@ entry, i.e. corresponding address range is excluded from being listed
 (and any value for this record is ignored).  This may be used to specify
 large range except some individual addresses, in a compact form.
 .PP
+When entries nest or overlap, exactly one value applies to every address:
+the most specific entry wins, so a listing inside an excluded range lists
+its addresses again and an exclusion inside a listed range removes them.
+If the same range is listed more than once, an exclusion wins wherever it
+appears in the file; otherwise the first line wins.  Two
+\fIa.b.c.d\-e.f.g.h\fR ranges that overlap without one containing the
+other resolve to the entry that starts later.  A \fI0.0.0.0/0\fR entry is
+accepted and acts as the fallback for every address not covered by a more
+specific entry.  An entry may be followed by
+per-entry parameters (see \fBPer-entry parameters\fR above).
+.PP
+Internally the entries are flattened at load time into a sorted array of
+disjoint address ranges, adjacent ranges with the same value are merged,
+and a lookup is a single binary search.  Memory is 8 bytes per stored
+range, plus 4 bytes per range when the entries do not all share one value,
+regardless of whether the entries are single addresses, CIDR blocks of any
+length or arbitrary ranges.  A file sorted by address loads fastest; an
+unsorted file is sorted first and the load log says so.  During the load
+the input lines are kept in a temporary array of 16 bytes per line.
+.PP
 If a line starts with a colon (:), this line specifies the default A value
 and TXT template to return (see below) for all subsequent entries up
 to end of current file.  If no default entry specified, and no value
@@ -605,10 +638,9 @@ and allows for the specification of A/TXT values on a per CIDR range
 basis.  (If multiple CIDR ranges match a query, the value for longest
 matching prefix is returned.)  Exclusions are supported too.
 .PP
-This dataset is not particularly memory-efficient for storing many
-single IP addresses \(em it uses about 50% more memory than the ip4set
-dataset in that case.  The ip4trie dataset is better adapted, however,
-for listing CIDR ranges (whose lengths are not a multiple of 8 bits.)
+For IPv4-only data the ip4set dataset uses less memory and loads faster;
+ip4trie is the choice when a dataset mixes IPv4 and IPv6 entries or needs
+dynamic updates (\fB\-U\fR).
 
 .SS "ip4tset Dataset"
 .PP

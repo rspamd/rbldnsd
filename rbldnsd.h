@@ -53,6 +53,8 @@ struct dnspacket {		/* private structure */
   const struct sockaddr *p_peer;/* address of the requesting client */
   unsigned p_peerlen;
   unsigned p_delay_ms;          /* optional delay requested by entry params */
+  int p_edns;			/* query has an OPT record: reply with one */
+  unsigned p_ednsver;		/* EDNS version given in the query */
 };
 
 struct kv_pair {
@@ -471,6 +473,8 @@ struct dsctx {
   const char *dsc_fname;	/* currently loading file name */
   int dsc_lineno;		/* current line number */
   int dsc_warns;		/* number of warnings so far */
+  int dsc_failed;		/* set by a finish hook (e.g. out of memory) to
+				 * fail the whole load */
   unsigned dsc_ip4maxrange;	/* max IP4 range allowed */
 };
 
@@ -486,6 +490,7 @@ int ds_combined_newset(struct dataset *ds, char *line, struct dsctx *dsc);
 extern unsigned def_ttl, min_ttl, max_ttl;
 extern const char def_rr[5];
 extern int accept_in_cidr;
+extern unsigned edns_maxpacket;	/* max size of reply to EDNS0 client */
 extern int nouncompress;
 extern struct dataset *g_dsacl;	/* global acl */
 extern struct dataset *g_dsaclkey;	/* global acl key */
