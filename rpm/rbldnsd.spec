@@ -3,7 +3,7 @@
 %global rbldnshome %{_localstatedir}/lib/rbldns
 
 Name:           rbldnsd
-Version:        1.1.0
+Version:        1.1.1
 Release:        1%{?dist}
 Summary:        Small fast daemon to serve DNSBLs
 License:        GPL-2.0-or-later
@@ -79,6 +79,14 @@ exit 0
 %attr(0755, root, root) %dir %{rbldnshome}
 
 %changelog
+* Fri Nov 13 2026 rbldnsd maintainers <vsevolod@rspamd.com> - 1.1.1-1
+ - Reimplement ip4set on sorted disjoint ranges; resolve duplicated
+   ip4trie/ip6trie prefixes consistently, with exclusions winning.
+ - Limit EDNS0 replies to 1232 bytes by default (-E), always return OPT,
+   minimal replies by default (-A restores NS in AUTH).
+ - Add dataset type overrides on combined zones; fix -U update socket and
+   several query parsing and reply bounds problems.
+
 * Mon Sep 07 2026 rbldnsd maintainers <vsevolod@rspamd.com> - 1.1.0-1
  - Add transactional reloads, local control and shared metrics, compiled
    domain snapshots, bounded UDP sends, and shared customer quotas.

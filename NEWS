@@ -1,7 +1,7 @@
 This file describes user-visible changes in rbldnsd.
 Newer news is at the top.
 
-Unreleased
+1.1.1 (13 Nov 2026)
  - ip4trie/ip6trie: duplicated prefixes are resolved consistently. The
    first entry is kept, and an exclusion always wins over a listing of the
    same prefix whatever the order. 1.1.0 started storing IPv4 entries as

@@ -1,3 +1,18 @@
+rbldnsd (1.1.1-1) unstable; urgency=medium
+
+  * Reimplement ip4set on a sorted array of disjoint ranges: less memory,
+    CIDR blocks of any length, most specific entry wins, /0 fallback.
+  * ip4trie/ip6trie: duplicated prefixes keep the first entry and an
+    exclusion always wins; dynamic updates (-U) still replace.
+  * Add dataset type overrides on combined zones (combined[from=to]:file).
+  * Limit EDNS0 replies to 1232 bytes by default (new -E), always return
+    OPT, answer BADVERS to unknown EDNS versions, and send minimal replies
+    by default (-A restores the NS list in AUTH).
+  * Fix the -U update socket, an out-of-bounds stack write on queries with
+    too many labels, and other bounds problems in parsing and replies.
+
+ -- rbldnsd maintainers <vsevolod@rspamd.com>  Fri, 13 Nov 2026 14:00:00 +0000
+
 rbldnsd (1.1.0-1) unstable; urgency=medium
 
   * Add local control and shared metrics (-M), transactional multiworker
