@@ -69,6 +69,22 @@ so it is possible to form a zone from a combination
 of several different dataset.  The same dataset may be
 reused for several zones too (and in this case, it will
 be read into memory only once).
+.PP
+The dataset type of a \fBcombined\fR specification may carry a type
+override in square brackets,
+.IR type [ from = to ,...]: file ,...
+Every \fB$DATASET\fR line inside the file that names type \fIfrom\fR is
+then loaded as type \fIto\fR (and the log says so).  This lets a data file
+that is shared with other \fBrbldnsd\fR installations keep its declared
+type while this instance stores it differently, e.g.
+.nf
+  combined[ip4trie=ip4set]:dynamic.zone
+.fi
+loads the file's IPv4 tries as ip4set.  A dataset is shared between zones
+only when type, override and file list are all the same.  Entries the
+target type does not accept (such as an IPv6 address in an ip4set) are
+skipped with the usual warning, so check the load log after adding an
+override.
 
 .PP
 There are several dataset formats available, each is suitable
@@ -768,6 +784,8 @@ $DATASET line are interpreted as a part of dataset of type \fItype\fR,
 with optional \fIname\fR (name is used for logging purposes only,
 and the whole ":\fIname\fR" (without quotes or square brackets)
 part is optional).  Note that combined datasets cannot be nested.
+A type override on the zone specification (see above) changes which
+dataset type a \fB$DATASET\fR line selects.
 Every \fIsubzone\fR will always be relative to the base zone name
 specified on command line.  If \fIsubzone\fR specified as single
 character "@", dataset will be connected to the base zone itself.

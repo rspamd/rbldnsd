@@ -20,35 +20,91 @@ static struct dataset *ds_list;
 struct dataset *g_dsacl;
 struct dataset *g_dsaclkey;
 
+const struct dstype *ds_find_type(const char *name) {
+  const struct dstype **dstp;
+  for (dstp = ds_types; *dstp; ++dstp)
+    if (strcmp(name, (*dstp)->dst_name) == 0)
+      return *dstp;
+  return NULL;
+}
+
+const struct dstype *ds_alias_type(const struct dataset *ds,
+                                   const struct dstype *t) {
+  const struct dstalias *a;
+  if (ds)
+    for (a = ds->ds_aliases; a; a = a->next)
+      if (a->from == t)
+        return a->to;
+  return t;
+}
+
+/* parse "from=to,from=to" (the text between the brackets of
+ * type[...]:files); fatal on anything that does not name two different,
+ * non-special dataset types */
+static struct dstalias *parse_aliases(const char *text, const char *spec) {
+  struct dstalias *list = NULL, **tail = &list, *a;
+  char *copy = estrdup(text), *item, *eq, *save = NULL;
+  for (item = strtok_r(copy, ",", &save); item; item = strtok_r(NULL, ",", &save)) {
+    if (!(eq = strchr(item, '=')) || eq == item || !eq[1])
+      error(0, "invalid dataset type override `%.60s' in `%.60s'", item, spec);
+    *eq++ = '\0';
+    a = tzalloc(struct dstalias);
+    if (!(a->from = ds_find_type(item)))
+      error(0, "unknown dataset type `%.60s' in type override of `%.60s'", item, spec);
+    if (!(a->to = ds_find_type(eq)))
+      error(0, "unknown dataset type `%.60s' in type override of `%.60s'", eq, spec);
+    if (a->from == a->to || (a->to->dst_flags & DSTF_SPECIAL) ||
+        (a->from->dst_flags & DSTF_SPECIAL))
+      error(0, "invalid dataset type override `%s=%s' in `%.60s'", item, eq, spec);
+    a->next = NULL;
+    *tail = a;
+    tail = &a->next;
+  }
+  free(copy);
+  if (!list)
+    error(0, "empty dataset type override in `%.60s'", spec);
+  return list;
+}
+
 static struct dataset *newdataset(char *spec) {
-  /* type:file,file,file... */
+  /* type[from=to,...]:file,file,file... */
   struct dataset *ds, **dsp;
-  char *f;
+  char *f, *alias = NULL, *orig;
   struct dsfile **dsfp, *dsf;
   static const char *const delims = ",:";
-  const struct dstype **dstp;
+  const struct dstype *dst;
 
+  orig = estrdup(spec);
   f = strchr(spec, ':');
   if (!f)
     error(0, "invalid zone data specification `%.60s'", spec);
   *f++ = '\0';
+  if ((alias = strchr(spec, '[')) != NULL) {
+    char *e = strchr(alias, ']');
+    if (!e || e[1] || e == alias + 1)
+      error(0, "invalid dataset type override in `%.60s'", orig);
+    *alias++ = '\0';
+    *e = '\0';
+  }
 
   for(dsp = &ds_list; (ds = *dsp) != NULL; dsp = &ds->ds_next)
     if (strcmp(ds->ds_type->dst_name, spec) == 0 &&
+        strcmp(ds->ds_aliasspec, alias ? alias : "") == 0 &&
         strcmp(ds->ds_spec, f) == 0)
       return ds;
 
-  dstp = ds_types;
-  while(strcmp(spec, (*dstp)->dst_name))
-    if (!*++dstp)
-      error(0, "unknown dataset type `%.60s'", spec);
+  if (!(dst = ds_find_type(spec)))
+    error(0, "unknown dataset type `%.60s'", spec);
   ds = (struct dataset*)ezalloc(sizeof(struct dataset) +
                                      sizeof(struct mempool) +
-                                     (*dstp)->dst_size);
-  ds->ds_type = *dstp;
+                                     dst->dst_size);
+  ds->ds_type = dst;
   ds->ds_mp = (struct mempool*)(ds + 1);
   ds->ds_dsd = (struct dsdata*)(ds->ds_mp + 1);
   ds->ds_spec = estrdup(f);
+  ds->ds_aliasspec = alias ? estrdup(alias) : "";
+  ds->ds_aliases = alias ? parse_aliases(alias, orig) : NULL;
+  free(orig);
 
   ds->ds_next = NULL;
   *dsp = ds;

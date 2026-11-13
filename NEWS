@@ -16,6 +16,12 @@ Unreleased
    the later one won for some trie shapes); the warning says so.
  - Fix -U: the update socket was indexed with the count of listening
    sockets, so rbldnsd always exited with "unable to listen for updates".
+ - A combined zone specification may carry a dataset type override,
+   combined[from=to,...]:file: every $DATASET line in the file that names
+   type `from' is loaded as type `to'. Meant for data files shared with
+   other rbldnsd installations that must keep their declared type (e.g.
+   load a huge ip4trie feed as ip4set here). Datasets are shared between
+   zones only when the override matches too.
  - ip4set is reimplemented on a sorted array of disjoint ranges (based on
    the ip4range proposal in PR #22): 8 bytes per stored range instead of
    16 bytes per octet-aligned entry, CIDR blocks of any length no longer

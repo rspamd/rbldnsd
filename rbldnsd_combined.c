@@ -89,6 +89,7 @@ int ds_combined_newset(struct dataset *ds, char *line, struct dsctx *dsc) {
   unsigned char dn[DNS_MAXDN];
   unsigned dnlen;
   char *name;
+  const struct dstype *dst;
 
   ds_combined_finishlast(dsc);
 
@@ -103,18 +104,21 @@ int ds_combined_newset(struct dataset *ds, char *line, struct dsctx *dsc) {
   if ((name = strchr(p, ':')) != NULL)
     *name++ = '\0';
 
+  if (!(dst = ds_find_type(p))) {
+    dslog(LOG_ERR, dsc, "unknown dataset type `%.60s'", p);
+    return -1;
+  }
+  if (ds_alias_type(ds, dst) != dst) {
+    /* type override from the zone specification (type[from=to]:file) */
+    dslog(LOG_INFO, dsc, "dataset type %s loaded as %s (override)",
+          dst->dst_name, ds_alias_type(ds, dst)->dst_name);
+    dst = ds_alias_type(ds, dst);
+  }
+
   for(;;) {	/* search appropriate dataset */
 
     if (!(dssub = dsd->sdslist)) {
       /* end of the saved list, allocate new dataset */
-      const struct dstype **dstp = ds_types, *dst;
-      dstp = ds_types;
-      while(strcmp(p, (*dstp)->dst_name))
-        if (!*++dstp) {
-          dslog(LOG_ERR, dsc, "unknown dataset type `%.60s'", p);
-          return -1;
-        }
-      dst = *dstp;
       if (dst->dst_flags & DSTF_SPECIAL) {
         dslog(LOG_ERR, dsc,
               "dataset type `%s' cannot be used inside `combined'",
@@ -131,7 +135,7 @@ int ds_combined_newset(struct dataset *ds, char *line, struct dsctx *dsc) {
       break;
     }
 
-    else if (strcmp(dssub->ds_type->dst_name, p) == 0) {
+    else if (dssub->ds_type == dst) {
       /* reuse existing one */
       dsd->sdslist = dssub->ds_next;
       break;
